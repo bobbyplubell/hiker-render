@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "hiker-math"
+version = "0.1.0"
+edition = "2024"
+description = "Reusable, egui-agnostic LaTeX math typesetting — pulldown-latex parse + Appendix-G/MathML-Core layout over an OpenType MATH font, output as SVG."
+
+[dependencies]
+# LaTeX math front-end: pure-Rust pull parser (we consume its event stream and
+# do our own Appendix-G/MathML-Core layout; we do NOT use its MathML writer).
+pulldown-latex = "0.7"
+# OpenType MATH-table + glyph outline reader for the bundled math font.
+ttf-parser = "0.25"
+
+[dev-dependencies]
+# Eyeball-only: rasterize the SVG output to PNG in examples/tests. Dev-only, so
+# the published library stays graphics-dependency-free.
+resvg = "0.47.0"
+
+[features]
+default = ["svg"]
+# SVG string output (zero graphics deps). Always-on for now; kept as a feature so
+# a future `shapes`/`egui` backend can be selected independently.
+svg = []

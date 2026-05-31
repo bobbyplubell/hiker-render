@@ -1,0 +1,7 @@
+[package]
+name = "hiker-graph"
+version = "0.1.0"
+edition = "2024"
+description = "Reusable, egui-agnostic graph layout — tree/radial + ForceAtlas2, and a from-scratch dagre (Sugiyama) port. std-only, no graphics deps."
+
+[dependencies]

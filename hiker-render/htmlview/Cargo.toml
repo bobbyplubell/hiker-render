@@ -1,0 +1,45 @@
+[package]
+name = "hiker-htmlview"
+version = "0.1.0"
+edition = "2021"
+description = "From-scratch HTML/CSS renderer that emits egui paint primitives (Stylo + our layout + egui paint)."
+
+[dependencies]
+egui = "0.32"
+html5ever = "0.38"
+markup5ever = "0.38"
+cssparser = "0.35"
+image = "0.25"
+resvg = "0.47.0"
+# The LaTeX math engine: the `hiker-math` crate (hiker-render/math).
+hiker-math = { path = "../math" }
+pprof = { version = "0.15.0", features = ["flamegraph", "protobuf-codec"], optional = true }
+dhat = { version = "0.3.3", optional = true }
+rustc-hash = "2.1.2"
+
+# Stylo (Servo's style engine) for the real cascade. markup5ever 0.38 (above)
+# resolves to the same web_atoms 0.2.4 that stylo 0.17 uses, so LocalName/
+# Namespace/Atom are the exact types stylo expects. See src/css/stylo/.
+style = { version = "0.17.0", package = "stylo" }
+stylo_dom = { version = "0.17.0", package = "stylo_dom" }
+style_config = { version = "0.17.0", package = "stylo_static_prefs" }
+selectors = "0.38.0"
+euclid = "0.22"
+app_units = "0.7.5"
+url = "2"
+
+[dev-dependencies]
+eframe = "0.32"
+egui_kittest = { version = "0.32", features = ["snapshot", "wgpu"] }
+
+[[example]]
+name = "viewer"
+
+[[example]]
+name = "profile"
+
+[features]
+# CPU sampling flamegraph via pprof; heap/allocation profile via dhat.
+# Enable one at a time, e.g. `cargo run --release --example profile --features profile-cpu`.
+profile-cpu = ["dep:pprof"]
+profile-heap = ["dep:dhat"]

@@ -1,0 +1,10 @@
+# Umbrella workspace. The render crates live under `hiker-render/`:
+#   hiker-render/          — LaTeX math engine (the `hiker-render` package)
+#   hiker-render/htmlview  — HTML/CSS renderer (Stylo + our layout/CSS/paint + egui)
+#   hiker-render/graph     — egui-agnostic graph layout (tree/force + dagre port)
+#   hiker-render/math      — egui-agnostic LaTeX math engine (→ SVG)
+#   (mermaid: planned, parallel to math + htmlview)
+# Plus the throwaway `stylo-spike` reference.
+[workspace]
+members = ["hiker-render", "hiker-render/htmlview", "hiker-render/graph", "hiker-render/math", "hiker-render/mermaid", "stylo-spike"]
+resolver = "2"

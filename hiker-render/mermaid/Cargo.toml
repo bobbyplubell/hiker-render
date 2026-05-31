@@ -1,0 +1,14 @@
+[package]
+name = "hiker-mermaid"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust mermaid diagram renderer (flowcharts first) → SVG. Layout via hiker-graph; egui-agnostic, SVG-string out."
+
+[dependencies]
+# Graph layout engine (dagre/Sugiyama port + tree/force). Flowcharts use the
+# layered (dagre) layout. egui-free, std-only.
+hiker-graph = { path = "../graph" }
+
+[dev-dependencies]
+# Eyeball-only: rasterize the SVG output to PNG in the example/tests.
+resvg = "0.47.0"
