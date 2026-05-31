@@ -80,6 +80,13 @@ pub enum BoxKind {
     /// [`BoxKind::Glyph`]). Carries no advance/height itself — the enclosing box
     /// owns the metrics, so the line is a pure overlay.
     Line { dx: f32, dy: f32, thickness: f32, color: [u8; 4] },
+    /// A solid filled rectangle (a `\colorbox`/`\fcolorbox` background). Unlike a
+    /// [`BoxKind::Rule`], it extends both **upward** `height` px above the baseline
+    /// and **downward** `depth` px below it, spanning the box's full bbox. `color`
+    /// is the straight RGBA fill. Emitted as the first child of the wrapping Hbox
+    /// so it paints behind the content. A `\fcolorbox` frame is drawn separately
+    /// as four [`BoxKind::Rule`]/[`BoxKind::Line`] edges over the fill.
+    Fill { width: f32, height: f32, depth: f32, color: [u8; 4] },
 }
 
 /// The TeX math class of an atom (TeXbook p. 158). This drives both glyph
@@ -140,6 +147,21 @@ enum ScriptPos {
     AboveBelow,
     /// Above/below in Display, beside in Text (`\sum`, `\lim`).
     Movable,
+}
+
+/// The fraction bar (vinculum) thickness, from pulldown's `Visual::Fraction`.
+/// `\frac` (`Fraction(None)`) keeps the font default; `\binom`/`\genfrac{}{}{0pt}{}`
+/// (an explicit `0` thickness) draws none; `\genfrac{(}{)}{2pt}{}{a}{b}` (an
+/// explicit non-zero thickness) draws the bar at that thickness, in px.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum BarThickness {
+    /// Default font (`FractionRuleThickness`) bar — `\frac` and friends.
+    Default,
+    /// No bar — `\binom`/`\genfrac` with a `0` explicit thickness.
+    None,
+    /// An explicit bar thickness, as a multiple of the **em** (resolved to px at
+    /// the base em in [`layout_frac`]) — `\genfrac` with a non-zero dimension.
+    Em(f32),
 }
 
 /// Horizontal alignment of cells within a matrix/array column (TeX `l`/`c`/`r`).
@@ -253,11 +275,12 @@ enum MathNode {
         style: Option<Style>,
         /// Color in effect for the fraction bar (`None` = inherit the default).
         color: Option<[u8; 4]>,
-        /// Whether to draw the horizontal bar. `\frac` (pulldown
-        /// `Fraction(None)`) draws it; `\binom`/`\genfrac{}{}{0pt}{}` (a `0`-em
+        /// The horizontal bar's thickness. `\frac` (pulldown `Fraction(None)`)
+        /// uses the font default; `\binom`/`\genfrac{}{}{0pt}{}` (a `0`-em
         /// `Fraction(Some(..))` bar size) draws no bar — only the stacked
-        /// numerator/denominator inside the surrounding `\left(\right)` parens.
-        bar: bool,
+        /// numerator/denominator inside the surrounding `\left(\right)` parens; an
+        /// explicit non-zero `\genfrac` thickness draws the bar at that width.
+        bar: BarThickness,
     },
     /// A `\left … \right`-fenced expression (or `\bigl`/`\bigr` etc.): the `body`
     /// row bracketed by an `open` and `close` delimiter that **scale to the
@@ -347,6 +370,19 @@ enum MathNode {
         /// Color in effect for the strike line (`None` = inherit the default).
         color: Option<[u8; 4]>,
     },
+    /// A `\colorbox`/`\fcolorbox` group: the `body` row drawn over a solid
+    /// `background` fill (spanning the body's bbox plus a small `\fboxsep`
+    /// padding), with an optional `border`-colored frame stroked around it
+    /// (`\fcolorbox`). pulldown emits these as a `Begin(Normal)` group whose first
+    /// `StateChange::Color` carries `target: Background` (and, for `\fcolorbox`, a
+    /// preceding `target: Border`). Spaces as an [`Class::Ord`] atom.
+    ColorBox {
+        body: MathList,
+        /// The fill color painted behind the body.
+        background: [u8; 4],
+        /// The frame color (`\fcolorbox`), or `None` for a plain `\colorbox`.
+        border: Option<[u8; 4]>,
+    },
 }
 
 /// Build a [`MathList`] tree from `src` via `pulldown-latex`.
@@ -435,6 +471,12 @@ fn read_list_until(
     // all deeper groups (which inherit `color` when we recurse). Background/border
     // targets (`\colorbox`/`\fcolorbox`) are not rendered yet — see below.
     let mut color = color;
+    // `\colorbox`/`\fcolorbox` backgrounds/borders: pulldown wraps the box in a
+    // `Begin(Normal)` group whose first `StateChange::Color` carries a `Background`
+    // (and, for `\fcolorbox`, a preceding `Border`) target. We capture them here
+    // and, on the group's `End`, wrap this list in a `MathNode::ColorBox`.
+    let mut background: Option<[u8; 4]> = None;
+    let mut border: Option<[u8; 4]> = None;
     // A `\dfrac`/`\tfrac` arrives as `Begin(Normal)`, `StateChange(Style(..))`,
     // `Visual(Fraction)` …; we capture the style change here so the following
     // fraction can adopt it. It only ever precedes a fraction in our subset.
@@ -458,13 +500,15 @@ fn read_list_until(
             }
             // Color state (`\color{…}`, and the `Begin`-wrapped form emitted by
             // `\textcolor{…}{…}`): pulldown has already resolved the named/`#rrggbb`
-            // color to RGB. We honor the text target and ignore background/border
-            // (`\colorbox`/`\fcolorbox`) for now — those still render their content
-            // in the current text color (TODO: fill a background rectangle).
+            // color to RGB. We honor the text target directly; the `Background` /
+            // `Border` targets (`\colorbox`/`\fcolorbox`) are recorded so the
+            // group's content is wrapped in a `ColorBox` on `End` (painted behind).
             Event::StateChange(StateChange::Color(cc)) => {
-                if matches!(cc.target, ColorTarget::Text) {
-                    let (r, g, b) = cc.color;
-                    color = Some([r, g, b, 255]);
+                let (r, g, b) = cc.color;
+                match cc.target {
+                    ColorTarget::Text => color = Some([r, g, b, 255]),
+                    ColorTarget::Background => background = Some([r, g, b, 255]),
+                    ColorTarget::Border => border = Some([r, g, b, 255]),
                 }
                 *i += 1;
             }
@@ -477,7 +521,8 @@ fn read_list_until(
             }
             // A fraction: the two following elements are numerator then denominator.
             // The `Option<Dimension>` is the bar thickness: `None` (`\frac`) keeps
-            // the rule; an explicit `0` (`\binom`/`\genfrac{}{}{0pt}{}`) draws none.
+            // the default rule; an explicit `0` (`\binom`/`\genfrac{}{}{0pt}{}`)
+            // draws none; an explicit non-zero `\genfrac` thickness is honored.
             Event::Visual(pulldown_latex::event::Visual::Fraction(d)) => {
                 let bar = bar_from_dimension(*d);
                 *i += 1;
@@ -544,6 +589,10 @@ fn read_list_until(
             }
         }
     }
+    // A `\colorbox`/`\fcolorbox` wraps this whole group's content over a fill.
+    if let Some(background) = background {
+        return vec![MathNode::ColorBox { body: list, background, border }];
+    }
     list
 }
 
@@ -576,15 +625,44 @@ fn retag_substack(node: MathNode) -> MathNode {
     }
 }
 
-/// Decide whether a fraction draws its bar from pulldown's `Visual::Fraction`
-/// dimension: `None` (`\frac` and friends) → draw the rule; an explicit thickness
-/// of `0` (`\binom`/`\genfrac{}{}{0pt}{}`) → draw no bar; any other explicit,
-/// non-zero thickness → still draw the bar (we do not yet honor custom widths).
-fn bar_from_dimension(d: Option<pulldown_latex::event::Dimension>) -> bool {
-    match d {
-        None => true,
-        Some(dim) => dim.value != 0.0,
+/// Resolve a fraction's bar thickness from pulldown's `Visual::Fraction`
+/// dimension: `None` (`\frac` and friends) → the font default; an explicit
+/// thickness of `0` (`\binom`/`\genfrac{}{}{0pt}{}`) → no bar; any other explicit,
+/// non-zero thickness (`\genfrac{(}{)}{2pt}{}{a}{b}`) → that thickness, expressed
+/// as a multiple of the em so [`layout_frac`] can scale it to px at the base em.
+///
+/// Length units are reduced to em with TeX's standard relations: `em`/`ex`/`mu`
+/// are font-relative directly (`1ex ≈ 0.5em`, `18mu = 1em`), and the absolute
+/// units use the TeXbook's `1in = 72.27pt` with the common `1em = 10pt` body-font
+/// convention (so `2pt → 0.2em`). This needs no DPI and matches KaTeX's `genfrac`
+/// closely enough for the rare explicit-thickness case.
+fn bar_from_dimension(d: Option<pulldown_latex::event::Dimension>) -> BarThickness {
+    use pulldown_latex::event::DimensionUnit as U;
+    let Some(dim) = d else {
+        return BarThickness::Default;
+    };
+    if dim.value == 0.0 {
+        return BarThickness::None;
     }
+    // Points per em under the standard 10pt-body convention; other absolute units
+    // first convert to pt, then to em.
+    const PT_PER_EM: f32 = 10.0;
+    const PT_PER_IN: f32 = 72.27;
+    let em = match dim.unit {
+        U::Em => dim.value,
+        U::Ex => dim.value * 0.5,
+        U::Mu => dim.value / 18.0,
+        U::Pt => dim.value / PT_PER_EM,
+        U::Bp => dim.value * (PT_PER_IN / 72.0) / PT_PER_EM,
+        U::Pc => dim.value * 12.0 / PT_PER_EM,
+        U::Sp => dim.value / 65536.0 / PT_PER_EM,
+        U::Dd => dim.value * (1238.0 / 1157.0) / PT_PER_EM,
+        U::Cc => dim.value * 12.0 * (1238.0 / 1157.0) / PT_PER_EM,
+        U::In => dim.value * PT_PER_IN / PT_PER_EM,
+        U::Cm => dim.value * (PT_PER_IN / 2.54) / PT_PER_EM,
+        U::Mm => dim.value * (PT_PER_IN / 25.4) / PT_PER_EM,
+    };
+    BarThickness::Em(em)
 }
 
 /// Map pulldown's `Style` (from `\dfrac`/`\tfrac`/`\displaystyle`/`\textstyle`)
@@ -1325,6 +1403,9 @@ fn layout_node(ctx: &Ctx, node: &MathNode, style: Style, cramped: bool) -> Optio
         MathNode::Cancel { body, color } => {
             ctx.with_color(*color, || layout_cancel(ctx, body, style, cramped))
         }
+        MathNode::ColorBox { body, background, border } => {
+            layout_colorbox(ctx, body, *background, *border, style, cramped)
+        }
     }
 }
 
@@ -1434,7 +1515,9 @@ fn italic_correction(ctx: &Ctx, node: &MathNode, style: Style) -> f32 {
         // A matrix's right edge is its (rectangular) grid / close delimiter.
         | MathNode::Matrix { .. }
         // A cancel's right edge is its struck body's box, not a trailing glyph.
-        | MathNode::Cancel { .. } => 0.0,
+        | MathNode::Cancel { .. }
+        // A colorbox's right edge is its padded frame, not a trailing glyph.
+        | MathNode::ColorBox { .. } => 0.0,
     }
 }
 
@@ -1824,7 +1907,7 @@ fn layout_frac(
     num: &MathList,
     den: &MathList,
     style: Style,
-    bar: bool,
+    bar: BarThickness,
 ) -> Option<Box> {
     let child_style = style.frac_child();
     // An empty numerator or denominator lays out as a zero-size box so the bar and
@@ -1845,9 +1928,16 @@ fn layout_frac(
     // MATH constants (px at base em), with sane fallbacks as multiples of the rule
     // thickness / em when the table is absent.
     let axis = c.map(|c| ctx.const_px(c.axis_height())).unwrap_or(0.25 * ctx.base_em);
-    let thickness = c
+    // The font-default rule thickness; an explicit `\genfrac` thickness (em →
+    // px at the base em) overrides it for the rule we draw, while the gap-min
+    // computations still reference the default (matching KaTeX).
+    let default_thickness = c
         .map(|c| ctx.const_px(c.fraction_rule_thickness()))
         .unwrap_or(0.04 * ctx.base_em);
+    let thickness = match bar {
+        BarThickness::Em(em) => em * ctx.base_em,
+        BarThickness::Default | BarThickness::None => default_thickness,
+    };
 
     let shift_up = c
         .map(|c| {
@@ -1925,9 +2015,9 @@ fn layout_frac(
     // The bar: a `Rule` box has height = thickness above its own baseline, so
     // placing its baseline at `dy = -rule_bottom` puts its bottom edge at
     // `rule_bottom` and its top at `rule_top` on the fraction baseline. A
-    // binomial (`bar == false`, from a `0`-thickness `\binom`/`\genfrac`) skips
-    // it, leaving the numerator/denominator stacked with no rule.
-    if bar {
+    // binomial (`BarThickness::None`, from a `0`-thickness `\binom`/`\genfrac`)
+    // skips it, leaving the numerator/denominator stacked with no rule.
+    if bar != BarThickness::None {
         children.push(Child {
             dx: 0.0,
             dy: -rule_bottom,
@@ -2000,6 +2090,88 @@ fn layout_cancel(ctx: &Ctx, body: &MathList, style: Style, cramped: bool) -> Opt
         kind: BoxKind::Hbox {
             children: vec![Child { dx: 0.0, dy: 0.0, b: body_box }, line],
         },
+    })
+}
+
+/// Lay out a `\colorbox`/`\fcolorbox`: the `body` row, padded by `\fboxsep`
+/// (≈ 0.3 em) on all sides, drawn over a solid `background` fill spanning the
+/// padded bounding box. `\fcolorbox` (a `Some` `border`) additionally strokes a
+/// frame of the same thickness as a fraction rule around that box.
+///
+/// The fill is emitted as the **first** child of the wrapping Hbox so paint order
+/// (depth-first, in child order) draws it behind the body; the frame edges follow
+/// the body so they sit on top. The node advances by the full padded width and
+/// spaces as an [`Class::Ord`] atom. References: KaTeX `\colorbox`/`\fcolorbox`
+/// (`src/functions/enclose.js`), `\fboxsep`/`\fboxrule` defaults.
+fn layout_colorbox(
+    ctx: &Ctx,
+    body: &MathList,
+    background: [u8; 4],
+    border: Option<[u8; 4]>,
+    style: Style,
+    cramped: bool,
+) -> Option<Box> {
+    let body_box = layout_list(ctx, body, style, cramped)?;
+    // `\fboxsep` padding around the content (TeX default 3pt ≈ 0.3 em).
+    let pad = 0.3 * ctx.base_em;
+    let inner_w = body_box.width;
+    let inner_h = body_box.height;
+    let inner_d = body_box.depth;
+
+    // Outer (padded) extents.
+    let width = inner_w + 2.0 * pad;
+    let height = inner_h + pad;
+    let depth = inner_d + pad;
+
+    // The background fill spans the full padded bbox, anchored at the left edge.
+    let fill = Child {
+        dx: 0.0,
+        dy: 0.0,
+        b: Box {
+            width,
+            height,
+            depth,
+            kind: BoxKind::Fill { width, height, depth, color: background },
+        },
+    };
+    // The body, inset by `pad` horizontally (its baseline is unchanged).
+    let content = Child { dx: pad, dy: 0.0, b: body_box };
+
+    let mut children = vec![fill, content];
+
+    // `\fcolorbox` frame: four edges of the padded rectangle, drawn over the fill
+    // via `BoxKind::Line` overlays (no metrics of their own). Corners run from the
+    // top-left clockwise; `dy` grows downward, so the top is at `-height`.
+    if let Some(border) = border {
+        let thickness = ctx
+            .face
+            .tables()
+            .math
+            .and_then(|m| m.constants)
+            .map(|c| ctx.const_px(c.fraction_rule_thickness()))
+            .unwrap_or(0.04 * ctx.base_em);
+        let edge = |x0: f32, y0: f32, dx: f32, dy: f32| Child {
+            dx: x0,
+            dy: y0,
+            b: Box {
+                width: 0.0,
+                height: 0.0,
+                depth: 0.0,
+                kind: BoxKind::Line { dx, dy, thickness, color: border },
+            },
+        };
+        // Top, bottom, left, right of the rectangle (origin at the baseline-left).
+        children.push(edge(0.0, -height, width, 0.0)); // top
+        children.push(edge(0.0, depth, width, 0.0)); // bottom
+        children.push(edge(0.0, -height, 0.0, height + depth)); // left
+        children.push(edge(width, -height, 0.0, height + depth)); // right
+    }
+
+    Some(Box {
+        width,
+        height,
+        depth,
+        kind: BoxKind::Hbox { children },
     })
 }
 
@@ -2753,6 +2925,8 @@ fn node_class(node: &MathNode) -> Class {
         MathNode::Matrix { .. } => Class::Inner,
         // A struck expression spaces as its content would — an Ord atom.
         MathNode::Cancel { .. } => Class::Ord,
+        // A `\colorbox`/`\fcolorbox` spaces as an Ord atom (it boxes its content).
+        MathNode::ColorBox { .. } => Class::Ord,
     }
 }
 
@@ -2858,6 +3032,7 @@ mod tests {
                     }
                 }
                 MathNode::Cancel { body, .. } => collect_atoms(body, out),
+                MathNode::ColorBox { body, .. } => collect_atoms(body, out),
             }
         }
     }
@@ -2909,7 +3084,7 @@ mod tests {
     fn leading_bin_becomes_ord() {
         // `+a`: the `+` is at list start, so it should not get Bin spacing.
         let opts = MathOptions::default();
-        let (_b, _f) = layout("+a", &opts).expect("lays out");
+        let (_b, _f) = layout("+a", &opts, 1.0).expect("lays out");
         // No panic / non-empty is enough; detailed metric checked via mod.rs tests.
     }
 
@@ -2917,9 +3092,10 @@ mod tests {
     /// tests can read script offsets without walking the tree by hand.
     fn flatten<'a>(b: &'a Box, ox: f32, oy: f32, out: &mut Vec<(f32, f32, &'a Box)>) {
         match &b.kind {
-            BoxKind::Glyph { .. } | BoxKind::Rule { .. } | BoxKind::Line { .. } => {
-                out.push((ox, oy, b))
-            }
+            BoxKind::Glyph { .. }
+            | BoxKind::Rule { .. }
+            | BoxKind::Line { .. }
+            | BoxKind::Fill { .. } => out.push((ox, oy, b)),
             BoxKind::Hbox { children } => {
                 for c in children {
                     flatten(&c.b, ox + c.dx, oy + c.dy, out);
@@ -2934,7 +3110,7 @@ mod tests {
     #[test]
     fn superscript_is_smaller_and_raised() {
         let opts = MathOptions::default();
-        let (root, _f) = layout("x^2", &opts).expect("lays out");
+        let (root, _f) = layout("x^2", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         assert_eq!(leaves.len(), 2, "x and 2");
@@ -2961,7 +3137,7 @@ mod tests {
     #[test]
     fn subscript_is_smaller_and_lowered() {
         let opts = MathOptions::default();
-        let (root, _f) = layout("a_i", &opts).expect("lays out");
+        let (root, _f) = layout("a_i", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         assert_eq!(leaves.len(), 2, "a and i");
@@ -2979,7 +3155,7 @@ mod tests {
     #[test]
     fn sub_and_super_have_positive_gap() {
         let opts = MathOptions::default();
-        let (root, _f) = layout("x_i^2", &opts).expect("lays out");
+        let (root, _f) = layout("x_i^2", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         assert_eq!(leaves.len(), 3, "x, i, 2");
@@ -3004,14 +3180,14 @@ mod tests {
     #[test]
     fn grouped_superscript_is_two_glyphs_wide() {
         let opts = MathOptions::default();
-        let (root, _f) = layout("e^{2x}", &opts).expect("lays out");
+        let (root, _f) = layout("e^{2x}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         // base `e` + two raised glyphs `2`, `x`.
         let raised: Vec<_> = leaves.iter().filter(|(_, dy, _)| *dy < 0.0).collect();
         assert_eq!(raised.len(), 2, "two-atom grouped superscript");
         // Single-glyph superscript width for comparison.
-        let (single, _f) = layout("e^2", &opts).expect("lays out");
+        let (single, _f) = layout("e^2", &opts, 1.0).expect("lays out");
         assert!(
             root.width > single.width,
             "grouped sup wider ({}) than single ({})",
@@ -3072,7 +3248,7 @@ mod tests {
     #[test]
     fn fraction_stacks_num_rule_den() {
         let opts = MathOptions::default();
-        let (root, _f) = layout(r"\frac{1}{2}", &opts).expect("lays out");
+        let (root, _f) = layout(r"\frac{1}{2}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
 
@@ -3097,7 +3273,7 @@ mod tests {
         assert!(gy[1] > *rule_oy, "denominator below the bar ({} > {rule_oy})", gy[1]);
 
         // Taller than a single digit.
-        let (single, _f) = layout("2", &opts).expect("lays out");
+        let (single, _f) = layout("2", &opts, 1.0).expect("lays out");
         assert!(
             root.height + root.depth > single.height + single.depth,
             "fraction ({} + {}) taller than a digit ({} + {})",
@@ -3117,7 +3293,7 @@ mod tests {
         let opts = MathOptions::default();
 
         // `\frac{n}{k}` → exactly one Rule (the bar).
-        let (frac, _f) = layout(r"\frac{n}{k}", &opts).expect("lays out");
+        let (frac, _f) = layout(r"\frac{n}{k}", &opts, 1.0).expect("lays out");
         let mut frac_leaves = Vec::new();
         flatten(&frac, 0.0, 0.0, &mut frac_leaves);
         let frac_rules = frac_leaves
@@ -3127,7 +3303,7 @@ mod tests {
         assert_eq!(frac_rules, 1, "\\frac keeps its bar");
 
         // `\binom{n}{k}` → no Rule at all (no bar), but still its two paren glyphs.
-        let (binom, _f) = layout(r"\binom{n}{k}", &opts).expect("lays out");
+        let (binom, _f) = layout(r"\binom{n}{k}", &opts, 1.0).expect("lays out");
         let mut binom_leaves = Vec::new();
         flatten(&binom, 0.0, 0.0, &mut binom_leaves);
         let binom_rules = binom_leaves
@@ -3147,9 +3323,243 @@ mod tests {
             _ => panic!("expected a Delim around the binomial"),
         };
         match frac_node {
-            MathNode::Frac { bar, .. } => assert!(!*bar, "binomial fraction has no bar"),
+            MathNode::Frac { bar, .. } => {
+                assert_eq!(*bar, BarThickness::None, "binomial fraction has no bar")
+            }
             _ => panic!("expected a Frac inside the parens"),
         }
+    }
+
+    /// `\genfrac[]{2pt}{}{a}{b}` honors its explicit 2pt bar thickness: the parsed
+    /// `Frac` carries a non-zero `BarThickness::Em`, and the laid-out bar rule is
+    /// drawn **thicker** than a default `\frac`'s bar at the same em.
+    ///
+    /// Note: pulldown-latex 0.7 accepts genfrac delimiters only as *bare tokens*
+    /// (`\genfrac[]{…}`) or empty groups (`\genfrac{}{}{…}`), and rejects the
+    /// braced `\genfrac{[}{]}{…}` spelling with a `Delimiter` error — so the test
+    /// (and sample) use the bracket-token form.
+    #[test]
+    fn genfrac_honors_custom_bar_thickness() {
+        // Parse: the bar is an explicit (non-zero, non-default) thickness in em.
+        let list = parse_list(r"\genfrac[]{2pt}{}{a}{b}").unwrap();
+        // pulldown wraps the genfrac's delimiters in a `Delim`; find the `Frac`.
+        fn find_frac(list: &MathList) -> Option<&MathNode> {
+            for n in list {
+                match n {
+                    f @ MathNode::Frac { .. } => return Some(f),
+                    MathNode::Delim { body, .. } | MathNode::Group(body) => {
+                        if let Some(f) = find_frac(body) {
+                            return Some(f);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        match find_frac(&list).expect("a Frac node") {
+            MathNode::Frac { bar, .. } => match bar {
+                BarThickness::Em(em) => assert!(*em > 0.0, "2pt → positive em {em}"),
+                other => panic!("expected an explicit Em thickness, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+
+        // Layout: the genfrac bar is thicker than the default `\frac` bar.
+        let opts = MathOptions::default();
+        fn bar_thickness(src: &str, opts: &MathOptions) -> f32 {
+            let (root, _f) = layout(src, opts, 1.0).expect("lays out");
+            let mut leaves = Vec::new();
+            flatten(&root, 0.0, 0.0, &mut leaves);
+            leaves
+                .iter()
+                .find_map(|(_, _, b)| match b.kind {
+                    BoxKind::Rule { thickness, .. } => Some(thickness),
+                    _ => None,
+                })
+                .expect("a fraction bar rule")
+        }
+        let default_t = bar_thickness(r"\frac{a}{b}", &opts);
+        let custom_t = bar_thickness(r"\genfrac[]{2pt}{}{a}{b}", &opts);
+        assert!(
+            custom_t > default_t * 1.5,
+            "2pt genfrac bar ({custom_t}) thicker than default \\frac bar ({default_t})"
+        );
+    }
+
+    /// `\colorbox{yellow}{x+1}` draws a solid `Fill` rectangle behind its content,
+    /// emitted as the **first** child so it paints first (behind). `\fcolorbox`
+    /// additionally strokes a frame (four `Line`s) over the fill.
+    #[test]
+    fn colorbox_draws_background_fill() {
+        let opts = MathOptions::default();
+        let src = super::super::color::normalize_color_args(r"\colorbox{yellow}{x+1}", opts.color);
+        let (root, _f) = layout(&src, &opts, 1.0).expect("lays out");
+
+        // The top-level Hbox's colorbox child is itself an Hbox whose first child
+        // is the Fill (paint order = behind), followed by the content.
+        let mut leaves = Vec::new();
+        flatten(&root, 0.0, 0.0, &mut leaves);
+        let fills: Vec<_> = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(b.kind, BoxKind::Fill { .. }))
+            .collect();
+        assert_eq!(fills.len(), 1, "one background fill");
+        if let BoxKind::Fill { width, height, depth, color } = fills[0].2.kind {
+            assert!(width > 0.0 && (height + depth) > 0.0, "fill spans a real bbox");
+            assert_eq!(color, [255, 255, 0, 255], "yellow fill");
+        }
+        // The content glyphs (x, +, 1) still render.
+        let glyphs = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(b.kind, BoxKind::Glyph { .. }))
+            .count();
+        assert!(glyphs >= 3, "x + 1 glyphs render over the fill");
+
+        // Paint order: walk the colorbox Hbox directly and check the Fill is first.
+        fn first_kind_is_fill(b: &Box) -> bool {
+            if let BoxKind::Hbox { children } = &b.kind {
+                for c in children {
+                    if matches!(c.b.kind, BoxKind::Fill { .. }) {
+                        return true;
+                    }
+                    if matches!(c.b.kind, BoxKind::Hbox { .. }) && first_kind_is_fill(&c.b) {
+                        // Recurse into the colorbox's own Hbox.
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        assert!(first_kind_is_fill(&root), "fill present (painted behind content)");
+    }
+
+    /// `\fcolorbox{red}{yellow}{x}` adds a red frame (four `Line` overlays) on top
+    /// of the yellow background fill.
+    #[test]
+    fn fcolorbox_adds_a_border_frame() {
+        let opts = MathOptions::default();
+        let src = super::super::color::normalize_color_args(r"\fcolorbox{red}{yellow}{x}", opts.color);
+        let (root, _f) = layout(&src, &opts, 1.0).expect("lays out");
+        let mut leaves = Vec::new();
+        flatten(&root, 0.0, 0.0, &mut leaves);
+
+        let fills = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(b.kind, BoxKind::Fill { .. }))
+            .count();
+        assert_eq!(fills, 1, "one yellow background fill");
+        let frame: Vec<_> = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(b.kind, BoxKind::Line { .. }))
+            .collect();
+        assert_eq!(frame.len(), 4, "four frame edges");
+        for (_, _, b) in &frame {
+            if let BoxKind::Line { color, .. } = b.kind {
+                assert_eq!(color, [255, 0, 0, 255], "red frame edge");
+            }
+        }
+    }
+
+    /// The accent's horizontal offset tracks the **base glyph's** top-accent
+    /// attachment: `\hat{f}` (a slanted `f`, attachment well right of center) puts
+    /// its hat farther right than `\hat{l}` (a near-symmetric `l`).
+    #[test]
+    fn accent_offset_shifts_with_base_attachment() {
+        let opts = MathOptions::default();
+        fn accent_dx(src: &str, opts: &MathOptions) -> f32 {
+            let (root, _f) = layout(src, opts, 1.0).expect("lays out");
+            let mut leaves = Vec::new();
+            flatten(&root, 0.0, 0.0, &mut leaves);
+            // The accent is the raised glyph (negative oy); the base sits on the
+            // baseline (oy ≈ 0). Return the accent's absolute x.
+            leaves
+                .iter()
+                .filter(|(_, oy, _)| *oy < -0.01)
+                .map(|(ox, _, _)| *ox)
+                .fold(f32::NEG_INFINITY, f32::max)
+        }
+        let hat_f = accent_dx(r"\hat{f}", &opts);
+        let hat_l = accent_dx(r"\hat{l}", &opts);
+        assert!(hat_f.is_finite() && hat_l.is_finite(), "both accents placed");
+        assert!(
+            hat_f > hat_l,
+            "f's rightward attachment pushes its hat farther right ({hat_f}) than l's ({hat_l})"
+        );
+    }
+
+    /// `\sum\nolimits_i^n` keeps its scripts **beside** the operator even in
+    /// Display style (pulldown maps `\nolimits` → `ScriptPos::Right`), while a
+    /// plain `\sum_i^n` in Display stacks them **above/below** (`Movable`).
+    #[test]
+    fn nolimits_keeps_scripts_beside_in_display() {
+        // Parse positions: `\nolimits` → Right, `\limits` → AboveBelow.
+        fn script_pos(src: &str) -> ScriptPos {
+            fn find(list: &MathList) -> Option<ScriptPos> {
+                for n in list {
+                    match n {
+                        MathNode::Script { position, .. } => return Some(*position),
+                        MathNode::Group(inner) => {
+                            if let Some(p) = find(inner) {
+                                return Some(p);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            find(&parse_list(src).unwrap()).expect("a Script node")
+        }
+        assert_eq!(script_pos(r"\sum\nolimits_{i}^{n}"), ScriptPos::Right);
+        assert_eq!(script_pos(r"\sum\limits_{i}^{n}"), ScriptPos::AboveBelow);
+
+        // Layout in Display: `\nolimits` scripts sit beside (some script glyph to
+        // the right of the operator, on/near the baseline); `\sum_i^n` stacks them
+        // (scripts centered, the superscript raised well above the operator top).
+        let display = MathOptions {
+            style: super::super::MathStyle::Display,
+            ..MathOptions::default()
+        };
+        let (beside, _f) = layout(r"\sum\nolimits_{i}^{n}", &display, 1.0).expect("lays out");
+        let (stacked, _f) = layout(r"\sum_{i}^{n}", &display, 1.0).expect("lays out");
+        // Beside-scripts make the row wider (scripts add advance) than the stacked
+        // form (scripts overlap the operator's column).
+        assert!(
+            beside.width > stacked.width,
+            "nolimits scripts beside widen the row ({}) vs stacked ({})",
+            beside.width,
+            stacked.width
+        );
+    }
+
+    /// `\int\limits_0^1` forces its limits **above/below** the integral
+    /// (`\limits` → `ScriptPos::AboveBelow`), unlike a bare `\int_0^1` (which
+    /// stays beside, `Right`).
+    #[test]
+    fn limits_stacks_integral_scripts_above_below() {
+        let list = parse_list(r"\int\limits_{0}^{1}").unwrap();
+        fn find_pos(list: &MathList) -> Option<ScriptPos> {
+            for n in list {
+                match n {
+                    MathNode::Script { position, .. } => return Some(*position),
+                    MathNode::Group(inner) => {
+                        if let Some(p) = find_pos(inner) {
+                            return Some(p);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        assert_eq!(
+            find_pos(&list),
+            Some(ScriptPos::AboveBelow),
+            "\\int\\limits forces above/below"
+        );
+        // A bare `\int_0^1` stays beside (Right).
+        assert_eq!(find_pos(&parse_list(r"\int_{0}^{1}").unwrap()), Some(ScriptPos::Right));
     }
 
     /// `\cancel{x}` lays out the `x` with a diagonal `Line` overlaid across its
@@ -3160,7 +3570,7 @@ mod tests {
         let opts = MathOptions::default();
         // `\cancel` is shimmed in the macro pass, so expand before laying out.
         let src = super::super::macros::expand_definitions(r"\cancel{x}");
-        let (root, _f) = layout(&src, &opts).expect("lays out");
+        let (root, _f) = layout(&src, &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
 
@@ -3203,7 +3613,7 @@ mod tests {
     #[test]
     fn not_does_not_strike() {
         let opts = MathOptions::default();
-        let (root, _f) = layout(r"\not=", &opts).expect("lays out");
+        let (root, _f) = layout(r"\not=", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let lines = leaves
@@ -3239,7 +3649,7 @@ mod tests {
 
         // It renders Some with two stacked glyphs (a over b).
         let opts = MathOptions::default();
-        let (root, _f) = layout(&expanded, &opts).expect("lays out");
+        let (root, _f) = layout(&expanded, &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let mut ys: Vec<f32> = leaves
@@ -3264,6 +3674,190 @@ mod tests {
         assert!(out.is_some(), "sum over substack renders Some");
     }
 
+    /// `\substack{…}` renders one style step *smaller* than a plain `matrix`: the
+    /// substack glyphs use the script em (≈ 0.7×), so its glyph `scale` is below
+    /// the plain matrix's.
+    #[test]
+    fn substack_cells_are_script_sized() {
+        let opts = MathOptions {
+            style: super::super::MathStyle::Display,
+            ..MathOptions::default()
+        };
+        // Smallest glyph scale among the leaves of a render.
+        let min_scale = |src: &str| -> f32 {
+            let expanded = super::super::macros::expand_definitions(src);
+            let (root, _f) = layout(&expanded, &opts, 1.0).expect("lays out");
+            let mut leaves = Vec::new();
+            flatten(&root, 0.0, 0.0, &mut leaves);
+            leaves
+                .iter()
+                .filter_map(|(_, _, b)| match b.kind {
+                    BoxKind::Glyph { scale, .. } => Some(scale),
+                    _ => None,
+                })
+                .fold(f32::INFINITY, f32::min)
+        };
+        let sub = min_scale(r"\substack{a \\ b}");
+        let plain = min_scale(r"\begin{matrix}a \\ b\end{matrix}");
+        assert!(sub.is_finite() && plain.is_finite());
+        assert!(
+            sub < plain - 1e-3,
+            "substack glyph scale {sub} should be smaller than plain matrix {plain}"
+        );
+    }
+
+    /// `\begin{array}{c|c} a & b \\ c & d \end{array}`: the `|` in the column spec
+    /// produces a vertical `Rule` between the two columns (a tall, thin rule whose
+    /// height exceeds its width), positioned between the column x-offsets.
+    #[test]
+    fn array_vertical_rule_between_columns() {
+        let opts = MathOptions::default();
+        let (root, _f) =
+            layout(r"\begin{array}{c|c} a & b \\ c & d \end{array}", &opts, 1.0).expect("lays out");
+        let mut leaves = Vec::new();
+        flatten(&root, 0.0, 0.0, &mut leaves);
+        // A vertical rule is a tall, thin Rule (thickness == its drawn height >
+        // width). The horizontal fraction/accent rules are wide-and-short.
+        let vrules: Vec<_> = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(
+                b.kind,
+                BoxKind::Rule { width, thickness, .. } if thickness > width && thickness > 1.0
+            ))
+            .collect();
+        assert_eq!(vrules.len(), 1, "exactly one vertical rule, got {}", vrules.len());
+        let (rx, _, _) = vrules[0];
+        // The cell glyphs straddle the rule: at least one left of it, one right.
+        let glyph_xs: Vec<f32> = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(b.kind, BoxKind::Glyph { .. }))
+            .map(|(ox, _, _)| *ox)
+            .collect();
+        assert!(glyph_xs.iter().any(|&x| x < *rx), "a column left of the rule");
+        assert!(glyph_xs.iter().any(|&x| x > *rx), "a column right of the rule");
+    }
+
+    /// `\begin{array}{c||c} …`: a double `||` produces two adjacent vertical rules.
+    #[test]
+    fn array_double_vertical_rule() {
+        let opts = MathOptions::default();
+        let (root, _f) =
+            layout(r"\begin{array}{c||c} a & b \\ c & d \end{array}", &opts, 1.0).expect("lays out");
+        let mut leaves = Vec::new();
+        flatten(&root, 0.0, 0.0, &mut leaves);
+        let vrules = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(
+                b.kind,
+                BoxKind::Rule { width, thickness, .. } if thickness > width && thickness > 1.0
+            ))
+            .count();
+        assert_eq!(vrules, 2, "double bar → two vertical rules, got {vrules}");
+    }
+
+    /// `\begin{array}{cc} a & b \\ \hline c & d \end{array}`: the `\hline` produces
+    /// a horizontal `Rule` spanning the grid width between the two rows.
+    #[test]
+    fn array_horizontal_rule_between_rows() {
+        let opts = MathOptions::default();
+        let (root, _f) =
+            layout(r"\begin{array}{cc} a & b \\ \hline c & d \end{array}", &opts, 1.0)
+                .expect("lays out");
+        let mut leaves = Vec::new();
+        flatten(&root, 0.0, 0.0, &mut leaves);
+        // A horizontal rule is wide and short (width > thickness, width ~ grid).
+        let hrules: Vec<_> = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(
+                b.kind,
+                BoxKind::Rule { width, thickness, .. } if width > thickness && width > 1.0
+            ))
+            .collect();
+        assert_eq!(hrules.len(), 1, "exactly one horizontal rule, got {}", hrules.len());
+        // It sits between the two row baselines (some glyph above it, some below).
+        let (_, ry, _) = hrules[0];
+        let glyph_ys: Vec<f32> = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(b.kind, BoxKind::Glyph { .. }))
+            .map(|(_, oy, _)| *oy)
+            .collect();
+        assert!(glyph_ys.iter().any(|&y| y < *ry), "a row above the rule");
+        assert!(glyph_ys.iter().any(|&y| y > *ry), "a row below the rule");
+    }
+
+    /// `\hline` at the top and bottom (`\begin{array}{c} \hline a \\ \hline`) both
+    /// render, giving two horizontal rules.
+    #[test]
+    fn array_top_and_bottom_hlines() {
+        let opts = MathOptions::default();
+        let (root, _f) =
+            layout(r"\begin{array}{c} \hline a \\ \hline \end{array}", &opts, 1.0)
+                .expect("lays out");
+        let mut leaves = Vec::new();
+        flatten(&root, 0.0, 0.0, &mut leaves);
+        let hrules = leaves
+            .iter()
+            .filter(|(_, _, b)| matches!(
+                b.kind,
+                BoxKind::Rule { width, thickness, .. } if width > thickness && width > 1.0
+            ))
+            .count();
+        assert_eq!(hrules, 2, "top + bottom hline → two rules, got {hrules}");
+    }
+
+    /// `\arraystretch` scales inter-row spacing: a matrix laid out with a stretch of
+    /// 1.8 is taller than the same matrix at the default 1.0.
+    #[test]
+    fn arraystretch_scales_row_spacing() {
+        let opts = MathOptions {
+            style: super::super::MathStyle::Display,
+            ..MathOptions::default()
+        };
+        let src = r"\begin{matrix} a \\ b \\ c \end{matrix}";
+        let (plain, _f) = layout(src, &opts, 1.0).expect("lays out");
+        let (tall, _f) = layout(src, &opts, 1.8).expect("lays out");
+        assert!(
+            tall.height + tall.depth > plain.height + plain.depth + 1.0,
+            "stretched matrix ({} + {}) taller than default ({} + {})",
+            tall.height,
+            tall.depth,
+            plain.height,
+            plain.depth
+        );
+    }
+
+    /// The macro pass extracts `\renewcommand{\arraystretch}{F}` (strips it, returns
+    /// F) so it threads into layout: the rendered matrix is taller with a large F.
+    #[test]
+    fn arraystretch_renewcommand_extracted_and_applied() {
+        use super::super::macros;
+        let (stripped, f) =
+            macros::extract_arraystretch(&macros::expand_definitions(r"\renewcommand{\arraystretch}{2}"));
+        assert_eq!(f, Some(2.0), "factor parsed from \\renewcommand");
+        assert!(!stripped.contains("arraystretch"), "definition stripped");
+
+        let opts = MathOptions {
+            style: super::super::MathStyle::Display,
+            ..MathOptions::default()
+        };
+        let plain = super::super::render_latex(
+            r"\begin{matrix} a \\ b \\ c \end{matrix}",
+            &opts,
+        )
+        .expect("renders");
+        let tall = super::super::render_latex(
+            r"\renewcommand{\arraystretch}{2}\begin{matrix} a \\ b \\ c \end{matrix}",
+            &opts,
+        )
+        .expect("renders");
+        assert!(
+            tall.height_px > plain.height_px + 1.0,
+            "renewcommand-stretched matrix taller end-to-end ({} vs {})",
+            tall.height_px,
+            plain.height_px
+        );
+    }
+
     /// A Display-style `\frac` is taller (larger shifts / gaps) than the same
     /// fraction in Inline (Text) style.
     #[test]
@@ -3276,8 +3870,8 @@ mod tests {
             style: super::super::MathStyle::Display,
             ..MathOptions::default()
         };
-        let (ib, _) = layout(r"\frac{1}{2}", &inline).expect("lays out");
-        let (db, _) = layout(r"\frac{1}{2}", &display).expect("lays out");
+        let (ib, _) = layout(r"\frac{1}{2}", &inline, 1.0).expect("lays out");
+        let (db, _) = layout(r"\frac{1}{2}", &display, 1.0).expect("lays out");
         assert!(
             db.height + db.depth > ib.height + ib.depth,
             "display ({} + {}) taller than inline ({} + {})",
@@ -3293,7 +3887,7 @@ mod tests {
     #[test]
     fn fraction_in_superscript_is_script_size() {
         let opts = MathOptions::default();
-        let (root, _f) = layout(r"x^{\frac{1}{2}}", &opts).expect("lays out");
+        let (root, _f) = layout(r"x^{\frac{1}{2}}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
 
@@ -3373,8 +3967,8 @@ mod tests {
     #[test]
     fn left_right_brackets_content() {
         let opts = MathOptions::default();
-        let (fence, _f) = layout(r"\left( x \right)", &opts).expect("lays out");
-        let (bare, _f) = layout("x", &opts).expect("lays out");
+        let (fence, _f) = layout(r"\left( x \right)", &opts, 1.0).expect("lays out");
+        let (bare, _f) = layout("x", &opts, 1.0).expect("lays out");
 
         // Top-level row wraps the fence; its children are [open][body][close].
         let fence = only_child(&fence);
@@ -3395,8 +3989,8 @@ mod tests {
     #[test]
     fn delim_grows_with_content() {
         let opts = MathOptions::default();
-        let (small, _f) = layout(r"\left( x \right)", &opts).expect("lays out");
-        let (big, _f) = layout(r"\left( \frac{a}{b} \right)", &opts).expect("lays out");
+        let (small, _f) = layout(r"\left( x \right)", &opts, 1.0).expect("lays out");
+        let (big, _f) = layout(r"\left( \frac{a}{b} \right)", &opts, 1.0).expect("lays out");
 
         let open_h = |b: &Box| -> f32 {
             let b = only_child(b);
@@ -3416,7 +4010,7 @@ mod tests {
     #[test]
     fn null_left_delim_has_no_open_box() {
         let opts = MathOptions::default();
-        let (fence, _f) = layout(r"\left. x \right|", &opts).expect("lays out");
+        let (fence, _f) = layout(r"\left. x \right|", &opts, 1.0).expect("lays out");
         let fence = only_child(&fence);
         let BoxKind::Hbox { children } = &fence.kind else { panic!("hbox") };
         // [body][close] only — the null open contributes nothing.
@@ -3431,8 +4025,8 @@ mod tests {
     #[test]
     fn tall_delim_assembles_finite() {
         let opts = MathOptions::default();
-        let (one, _f) = layout(r"\left( \frac{a}{b} \right)", &opts).expect("lays out");
-        let (tall, _f) = layout(r"\left( \frac{\frac{a}{b}}{c} \right)", &opts).expect("lays out");
+        let (one, _f) = layout(r"\left( \frac{a}{b} \right)", &opts, 1.0).expect("lays out");
+        let (tall, _f) = layout(r"\left( \frac{\frac{a}{b}}{c} \right)", &opts, 1.0).expect("lays out");
         let open_h = |b: &Box| -> f32 {
             let b = only_child(b);
             let BoxKind::Hbox { children } = &b.kind else { panic!() };
@@ -3448,8 +4042,8 @@ mod tests {
     #[test]
     fn big_delim_is_larger_than_plain() {
         let opts = MathOptions::default();
-        let (big, _f) = layout(r"\bigl(", &opts).expect("lays out");
-        let (plain, _f) = layout("(", &opts).expect("lays out");
+        let (big, _f) = layout(r"\bigl(", &opts, 1.0).expect("lays out");
+        let (plain, _f) = layout("(", &opts, 1.0).expect("lays out");
         assert!(
             big.height + big.depth > plain.height + plain.depth,
             "\\bigl( ({} + {}) taller than ( ({} + {})",
@@ -3497,7 +4091,7 @@ mod tests {
     #[test]
     fn sqrt_has_surd_and_vinculum() {
         let opts = MathOptions::default();
-        let (root, _f) = layout(r"\sqrt{x}", &opts).expect("lays out");
+        let (root, _f) = layout(r"\sqrt{x}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
 
@@ -3532,7 +4126,7 @@ mod tests {
         let opts = MathOptions::default();
         // Tallest glyph (the surd) in each radical.
         let surd_extent = |src: &str| -> f32 {
-            let (root, _f) = layout(src, &opts).expect("lays out");
+            let (root, _f) = layout(src, &opts, 1.0).expect("lays out");
             let mut leaves = Vec::new();
             flatten(&root, 0.0, 0.0, &mut leaves);
             leaves
@@ -3545,8 +4139,8 @@ mod tests {
         let big = surd_extent(r"\sqrt{\frac{a}{b}}");
         assert!(big > small, "surd over a fraction ({big}) taller than over x ({small})");
         // Overall box is finite and taller too.
-        let (frac_root, _f) = layout(r"\sqrt{\frac{a}{b}}", &opts).expect("lays out");
-        let (x_root, _f) = layout(r"\sqrt{x}", &opts).expect("lays out");
+        let (frac_root, _f) = layout(r"\sqrt{\frac{a}{b}}", &opts, 1.0).expect("lays out");
+        let (x_root, _f) = layout(r"\sqrt{x}", &opts, 1.0).expect("lays out");
         assert!(
             frac_root.height + frac_root.depth > x_root.height + x_root.depth,
             "radical-over-fraction taller overall"
@@ -3559,8 +4153,8 @@ mod tests {
     #[test]
     fn cube_root_has_small_raised_degree() {
         let opts = MathOptions::default();
-        let (cbrt, _f) = layout(r"\sqrt[3]{x}", &opts).expect("lays out");
-        let (sqrt, _f) = layout(r"\sqrt{x}", &opts).expect("lays out");
+        let (cbrt, _f) = layout(r"\sqrt[3]{x}", &opts, 1.0).expect("lays out");
+        let (sqrt, _f) = layout(r"\sqrt{x}", &opts, 1.0).expect("lays out");
 
         let mut cleaves = Vec::new();
         flatten(&cbrt, 0.0, 0.0, &mut cleaves);
@@ -3594,7 +4188,7 @@ mod tests {
     #[test]
     fn radical_in_fraction_is_sane() {
         let opts = MathOptions::default();
-        let (root, _f) = layout(r"\frac{\sqrt{x}}{2}", &opts).expect("lays out");
+        let (root, _f) = layout(r"\frac{\sqrt{x}}{2}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let rules = leaves
@@ -3647,7 +4241,7 @@ mod tests {
     #[test]
     fn sum_display_uses_limits() {
         let display = opts_for(super::super::MathStyle::Display);
-        let (root, _f) = layout(r"\sum_{i=1}^{n} i", &display).expect("lays out");
+        let (root, _f) = layout(r"\sum_{i=1}^{n} i", &display, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
 
@@ -3680,7 +4274,7 @@ mod tests {
 
         // Compare ∑ glyph extent to a Text-style ∑.
         let inline = opts_for(super::super::MathStyle::Inline);
-        let (iroot, _f) = layout(r"\sum", &inline).expect("lays out");
+        let (iroot, _f) = layout(r"\sum", &inline, 1.0).expect("lays out");
         let mut ileaves = Vec::new();
         flatten(&iroot, 0.0, 0.0, &mut ileaves);
         let text_extent = ileaves
@@ -3701,7 +4295,7 @@ mod tests {
     #[test]
     fn sum_inline_uses_beside_scripts() {
         let inline = opts_for(super::super::MathStyle::Inline);
-        let (root, _f) = layout(r"\sum_{i=1}^{n} i", &inline).expect("lays out");
+        let (root, _f) = layout(r"\sum_{i=1}^{n} i", &inline, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
 
@@ -3732,7 +4326,7 @@ mod tests {
     #[test]
     fn int_display_stays_beside() {
         let display = opts_for(super::super::MathStyle::Display);
-        let (root, _f) = layout(r"\int_0^1 x", &display).expect("lays out");
+        let (root, _f) = layout(r"\int_0^1 x", &display, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
 
@@ -3831,7 +4425,7 @@ mod tests {
         }
 
         let opts = MathOptions::default();
-        let (root, _f) = layout(r"\hat{x}", &opts).expect("lays out");
+        let (root, _f) = layout(r"\hat{x}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let glyphs: Vec<_> = leaves
@@ -3843,7 +4437,7 @@ mod tests {
         let raised: Vec<_> = glyphs.iter().filter(|(_, oy, _)| *oy < 0.0).collect();
         assert_eq!(raised.len(), 1, "the accent sits above the base");
         // Result is about the base width wide.
-        let (bare, _f) = layout("x", &opts).expect("lays out");
+        let (bare, _f) = layout("x", &opts, 1.0).expect("lays out");
         assert!(
             (root.width - bare.width).abs() < bare.width,
             "accent box ≈ base width ({} vs {})",
@@ -3857,7 +4451,7 @@ mod tests {
     #[test]
     fn overline_adds_rule_above() {
         let opts = MathOptions::default();
-        let (root, _f) = layout(r"\overline{AB}", &opts).expect("lays out");
+        let (root, _f) = layout(r"\overline{AB}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let rules: Vec<_> = leaves
@@ -3868,7 +4462,7 @@ mod tests {
         let (_, rule_oy, rule) = rules[0];
         assert!(*rule_oy < 0.0, "rule sits above the baseline (oy {rule_oy})");
         // Rule spans ≈ the AB width.
-        let (bare, _f) = layout("AB", &opts).expect("lays out");
+        let (bare, _f) = layout("AB", &opts, 1.0).expect("lays out");
         assert!(
             (rule.width - bare.width).abs() < 0.01,
             "rule width {} ≈ AB width {}",
@@ -3882,7 +4476,7 @@ mod tests {
     #[test]
     fn underline_adds_rule_below() {
         let opts = MathOptions::default();
-        let (root, _f) = layout(r"\underline{x}", &opts).expect("lays out");
+        let (root, _f) = layout(r"\underline{x}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let rule = leaves
@@ -3904,8 +4498,8 @@ mod tests {
             MathNode::Accent { stretchy, .. } => assert!(stretchy, "\\widehat is stretchy"),
             _ => panic!("expected an Accent node"),
         }
-        let (wide, _f) = layout(r"\widehat{xyz}", &opts).expect("lays out");
-        let (small, _f) = layout(r"\hat{a}", &opts).expect("lays out");
+        let (wide, _f) = layout(r"\widehat{xyz}", &opts, 1.0).expect("lays out");
+        let (small, _f) = layout(r"\hat{a}", &opts, 1.0).expect("lays out");
         assert!(
             wide.width > small.width,
             "\\widehat{{xyz}} ({}) wider than \\hat{{a}} ({})",
@@ -3921,7 +4515,7 @@ mod tests {
     fn assorted_accents_are_sane() {
         let opts = MathOptions::default();
         for src in [r"\vec{v}", r"\bar{y}", r"\tilde{n}", r"\dot{x}", r"\ddot{x}"] {
-            let (root, _f) = layout(src, &opts).expect("lays out");
+            let (root, _f) = layout(src, &opts, 1.0).expect("lays out");
             let mut leaves = Vec::new();
             flatten(&root, 0.0, 0.0, &mut leaves);
             // `\bar` is a rule; the rest are glyphs — either way ≥ 2 drawables and
@@ -3954,8 +4548,8 @@ mod tests {
             _ => panic!("expected an AboveBelow Script wrapping a brace accent"),
         }
 
-        let (narrow, _f) = layout(r"\overbrace{a}^{1}", &opts).expect("lays out");
-        let (wide, _f) = layout(r"\overbrace{a+b+c+d}^{1}", &opts).expect("lays out");
+        let (narrow, _f) = layout(r"\overbrace{a}^{1}", &opts, 1.0).expect("lays out");
+        let (wide, _f) = layout(r"\overbrace{a+b+c+d}^{1}", &opts, 1.0).expect("lays out");
         assert!(
             wide.width > narrow.width * 2.0,
             "the brace stretches with the body ({} vs {})",
@@ -3963,7 +4557,7 @@ mod tests {
             narrow.width
         );
 
-        let (root, _f) = layout(r"\overbrace{a+b+c}^{n}", &opts).expect("lays out");
+        let (root, _f) = layout(r"\overbrace{a+b+c}^{n}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let above = leaves.iter().filter(|(_, oy, _)| *oy < -0.01).count();
@@ -3989,7 +4583,7 @@ mod tests {
             _ => panic!("expected an AboveBelow Script wrapping an under-brace accent"),
         }
 
-        let (root, _f) = layout(r"\underbrace{x+y}_{\text{sum}}", &opts).expect("lays out");
+        let (root, _f) = layout(r"\underbrace{x+y}_{\text{sum}}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let below = leaves.iter().filter(|(_, oy, _)| *oy > 0.01).count();
@@ -4002,8 +4596,8 @@ mod tests {
     #[test]
     fn xrightarrow_stretches_with_labels() {
         let opts = MathOptions::default();
-        let (bare, _f) = layout("→", &opts).expect("lays out");
-        let (arrow, _f) = layout(r"\xrightarrow{f}", &opts).expect("lays out");
+        let (bare, _f) = layout("→", &opts, 1.0).expect("lays out");
+        let (arrow, _f) = layout(r"\xrightarrow{f}", &opts, 1.0).expect("lays out");
         assert!(
             arrow.width > bare.width,
             "\\xrightarrow{{f}} ({}) is wider than a bare → ({})",
@@ -4019,7 +4613,7 @@ mod tests {
         assert_eq!(below, 0, "no label below for the over-only form");
 
         // The two-label form has a label above *and* below.
-        let (both, _f) = layout(r"\xrightarrow[g]{f}", &opts).expect("lays out");
+        let (both, _f) = layout(r"\xrightarrow[g]{f}", &opts, 1.0).expect("lays out");
         let mut leaves2 = Vec::new();
         flatten(&both, 0.0, 0.0, &mut leaves2);
         assert!(
@@ -4050,7 +4644,7 @@ mod tests {
     #[test]
     fn lim_display_subscript_below() {
         let display = opts_for(super::super::MathStyle::Display);
-        let (root, _f) = layout(r"\lim_{x \to 0} f", &display).expect("lays out");
+        let (root, _f) = layout(r"\lim_{x \to 0} f", &display, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
 
@@ -4115,7 +4709,7 @@ mod tests {
             style: super::super::MathStyle::Display,
             ..MathOptions::default()
         };
-        let (root, _f) = layout(r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}", &opts)
+        let (root, _f) = layout(r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}", &opts, 1.0)
             .expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
@@ -4145,7 +4739,7 @@ mod tests {
         assert!(xs.len() >= 3, "open + 2 cols + close ≥3 distinct x, got {xs:?}");
 
         // The fence is taller than one row: compare to a 1×1 matrix's row height.
-        let (one, _f) = layout(r"\begin{pmatrix} a \end{pmatrix}", &opts).expect("lays out");
+        let (one, _f) = layout(r"\begin{pmatrix} a \end{pmatrix}", &opts, 1.0).expect("lays out");
         assert!(
             root.height + root.depth > one.height + one.depth + 1.0,
             "2-row matrix ({} + {}) taller than 1-row ({} + {})",
@@ -4191,7 +4785,7 @@ mod tests {
             ..MathOptions::default()
         };
         let (root, _f) =
-            layout(r"\begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}", &opts).expect("lays out");
+            layout(r"\begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}", &opts, 1.0).expect("lays out");
         let mut leaves = Vec::new();
         flatten(&root, 0.0, 0.0, &mut leaves);
         let glyphs: Vec<_> = leaves
@@ -4226,7 +4820,7 @@ mod tests {
             ..MathOptions::default()
         };
         let (root, _f) =
-            layout(r"\begin{aligned} a &= b + c \\ x &= y \end{aligned}", &opts).expect("lays out");
+            layout(r"\begin{aligned} a &= b + c \\ x &= y \end{aligned}", &opts, 1.0).expect("lays out");
 
         // The matrix node has a right|left column pair touching, so the first cell
         // (right-aligned `a`/`x`) ends at the same x and the second cell (the `=…`)
@@ -4269,6 +4863,7 @@ mod tests {
         let (big, _f) = layout(
             r"\begin{pmatrix} \frac{1}{2} & 0 \\ 0 & \frac{1}{2} \end{pmatrix}",
             &opts,
+            1.0,
         )
         .expect("lays out");
         assert!(
@@ -4279,7 +4874,7 @@ mod tests {
         );
         // A fraction-bearing matrix is taller than the all-digit one.
         let (plain, _f) =
-            layout(r"\begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix}", &opts).expect("lays out");
+            layout(r"\begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix}", &opts, 1.0).expect("lays out");
         assert!(
             big.height + big.depth > plain.height + plain.depth,
             "frac matrix ({} + {}) taller than digit matrix ({} + {})",

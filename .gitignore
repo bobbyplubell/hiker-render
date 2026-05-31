@@ -1,0 +1,32 @@
+# Rust build output (workspace-wide)
+/target
+**/target
+
+# Vendored reference codebases: read-only study material (litehtml, servo,
+# gumbo-parser, microtex, katex, …), cloned via git and NOT part of this repo.
+# Keep our own design doc, though.
+references/*
+!references/ARCHITECTURE.md
+
+# Wikipedia test corpus: bulky, local-only sample articles + per-article CSS and
+# images used by hiker-htmlview's viewer/snapshot examples and wiki-article tests.
+# Kept out of git deliberately — it's external content (and trips secret scanners
+# on innocuous strings). Drop a copy into hiker-render/htmlview/wiki-sample/ to run
+# those examples/tests; the synthetic-fixture tests run without it.
+wiki-sample/
+
+# Profiling artifacts (pprof / dhat; see the `profile` example)
+flamegraph.svg
+*.pb
+dhat-heap.json
+profile.pb
+
+# Local scratch / debug dumps
+_snap_*.txt
+_kt_wgpu.txt
+*.tmp
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~

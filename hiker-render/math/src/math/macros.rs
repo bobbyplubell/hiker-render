@@ -10,14 +10,19 @@
 //!
 //! This is deliberately a *narrow* textual pass over the common `\newcommand`
 //! shapes — not a full TeX `\def` prefix / delimited-parameter emulator. The
-//! optional-argument default form (`\newcommand{\name}[n][default]{body}`) maps
-//! poorly to `\def` and is skipped (left verbatim) rather than mistranslated.
+//! optional-argument default form (`\newcommand{\name}[n][default]{body}`) is
+//! emulated by always supplying `default` for the optional slot (pulldown's
+//! `\def` cannot branch on a bracketed argument); see [`expand_definitions`].
 
 /// Rewrite LaTeX macro-definition spellings into TeX `\def` form, in place across
 /// the whole string. Recognized (anywhere in `src`):
 ///
 /// - `\newcommand{\name}{body}` / `\newcommand\name{body}` → `\def\name{body}`
 /// - `\newcommand{\name}[n]{body}` → `\def\name#1#2…#n{body}` (`n` in `1..=9`)
+/// - `\newcommand{\name}[n][default]{body}` → a `\def` taking the `n - 1`
+///   mandatory args, with the optional slot fixed to `default` (`#1 → default`,
+///   `#2 → #1`, …); pulldown's `\def` cannot branch on a bracketed argument, so a
+///   caller's explicit `\name[x]{…}` override is the one case this cannot model.
 /// - `\renewcommand` / `\providecommand` → identical to `\newcommand`
 ///   (pulldown's `\def` overwrites, so provide-vs-renew need not be distinguished)
 /// - `\DeclareMathOperator{\op}{text}` → `\def\op{\operatorname{text}}`
@@ -25,8 +30,7 @@
 ///
 /// The body is matched by balanced-brace counting (nested `{}` are handled), and
 /// whitespace between tokens is tolerated. Anything that does not parse as one of
-/// the above shapes — including the optional-argument-default form — is left
-/// verbatim so the parser sees it unchanged.
+/// the above shapes is left verbatim so the parser sees it unchanged.
 pub fn expand_definitions(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
@@ -78,11 +82,8 @@ pub fn extract_arraystretch(src: &str) -> (String, Option<f32>) {
                 if let Some((body, after)) = balanced_group(src, pos) {
                     if let Ok(f) = body.trim().parse::<f32>() {
                         if f.is_finite() && f > 0.0 {
+                            // Strip the definition and record the factor (latest wins).
                             factor = Some(f);
-                        }
-                        // Strip the whole definition regardless of parse success
-                        // only when it parsed; otherwise fall through verbatim.
-                        if f.is_finite() && f > 0.0 {
                             i = after;
                             continue;
                         }
@@ -208,15 +209,31 @@ fn parse_newcommand(src: &str, pos: usize) -> Option<(String, usize)> {
 
     // Optional `[n]` argument count.
     let mut nargs = 0usize;
+    // The optional-argument default (`\newcommand{\n}[k][default]{body}`), if any.
+    // TeX's `#1` is then the *optional* slot (defaulting to `default`) and
+    // `#2..#k` the mandatory ones. pulldown's `\def` cannot branch on a bracketed
+    // argument, so we always supply `default` for the optional slot, define
+    // `\name` to take the `k - 1` mandatory arguments, and renumber the body's
+    // parameters accordingly (`#1 → default`, `#2 → #1`, …, `#k → #{k-1}`). This
+    // emulates the common `\newcommand{\cmd}[k][d]{body}` call `\cmd{a}{b}…`
+    // (without the optional bracket); a caller-supplied `\cmd[x]{…}` would not
+    // override the default — that is the one TeX behaviour we cannot replicate.
+    let mut optional_default: Option<String> = None;
     if src[pos..].starts_with('[') {
         let (inner, after) = bracket_group(src, pos)?;
         nargs = inner.trim().parse::<usize>().ok().filter(|n| (1..=9).contains(n))?;
         pos = after;
         pos = skip_ws(src, pos);
-        // TODO: optional-argument defaults (`\newcommand{\n}[k][default]{body}`)
-        // map poorly to `\def`; skip the whole definition rather than corrupt it.
         if src[pos..].starts_with('[') {
-            return None;
+            let (def_inner, after) = bracket_group(src, pos)?;
+            optional_default = Some(def_inner);
+            pos = after;
+            pos = skip_ws(src, pos);
+            // Only a single optional-arg default is emulated; a second `[`
+            // (LaTeX allows at most one) is an unsupported shape — bail out.
+            if src[pos..].starts_with('[') {
+                return None;
+            }
         }
     }
 
@@ -226,9 +243,16 @@ fn parse_newcommand(src: &str, pos: usize) -> Option<(String, usize)> {
     }
     let (body, after) = balanced_group(src, pos)?;
 
+    // With an optional-arg default, fix `#1` to the default and shift the
+    // remaining `#k → #{k-1}`; `\def` then takes `nargs - 1` parameters.
+    let (body, def_params) = match &optional_default {
+        Some(default) => (substitute_optional(&body, default), nargs.saturating_sub(1)),
+        None => (body, nargs),
+    };
+
     let mut def = String::from(r"\def");
     def.push_str(&name);
-    for k in 1..=nargs {
+    for k in 1..=def_params {
         def.push('#');
         def.push(char::from(b'0' + k as u8));
     }
@@ -236,6 +260,44 @@ fn parse_newcommand(src: &str, pos: usize) -> Option<(String, usize)> {
     def.push_str(&body);
     def.push('}');
     Some((def, after))
+}
+
+/// Rewrite a `\newcommand` body for the optional-argument-default emulation:
+/// replace `#1` (the optional slot) with the literal `default`, and renumber the
+/// mandatory parameters down by one (`#2 → #1`, `#3 → #2`, …). A literal `##`
+/// (an escaped hash) is copied through untouched.
+fn substitute_optional(body: &str, default: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut p = 0;
+    while p < bytes.len() {
+        if bytes[p] == b'#' {
+            match bytes.get(p + 1) {
+                Some(b'#') => {
+                    // Escaped hash: copy both bytes verbatim.
+                    out.push_str("##");
+                    p += 2;
+                    continue;
+                }
+                Some(d @ b'1'..=b'9') => {
+                    let n = d - b'0';
+                    if n == 1 {
+                        out.push_str(default);
+                    } else {
+                        out.push('#');
+                        out.push(char::from(b'0' + (n - 1)));
+                    }
+                    p += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        let ch = body[p..].chars().next().unwrap();
+        out.push(ch);
+        p += ch.len_utf8();
+    }
+    out
 }
 
 /// Parse the tail of a `\DeclareMathOperator` (or `\DeclareMathOperator*`) starting
@@ -453,10 +515,33 @@ mod tests {
     }
 
     #[test]
-    fn optional_arg_default_skipped() {
-        // The `[1][0]` default form is left verbatim (untranslated) — no panic.
+    fn optional_arg_default_emulated() {
+        // `[1][0]`: the single (optional) arg is fixed to its default `0`, so the
+        // body's `#1` becomes `0` and the `\def` takes no parameters.
         let s = r"\newcommand{\inc}[1][0]{#1+1}";
-        assert_eq!(expand_definitions(s), s);
+        assert_eq!(expand_definitions(s), r"\def\inc{0+1}");
+    }
+
+    #[test]
+    fn optional_arg_default_renumbers_mandatory() {
+        // `[2][d]`: `#1` is the optional slot (→ `d`); the mandatory `#2` shifts to
+        // `#1`, so `\def` takes one parameter.
+        assert_eq!(
+            expand_definitions(r"\newcommand{\f}[2][d]{#1+#2}"),
+            r"\def\f#1{d+#1}"
+        );
+    }
+
+    #[test]
+    fn optional_arg_default_does_not_panic() {
+        // Whatever the shape, expansion never panics and stays a usable string.
+        for s in [
+            r"\newcommand{\inc}[1][0]{#1+1}",
+            r"\newcommand{\g}[3][x]{#1#2#3}",
+            r"\newcommand{\h}[1][]{#1}", // empty default
+        ] {
+            let _ = expand_definitions(s);
+        }
     }
 
     #[test]
@@ -497,5 +582,29 @@ mod tests {
             expand_definitions(r"\substack{a \\ b}"),
             format!(r"{{{SUBSTACK_SENTINEL}\begin{{matrix}}a \\ b\end{{matrix}}}}")
         );
+    }
+
+    #[test]
+    fn arraystretch_extracted_and_stripped() {
+        // `\renewcommand` is first translated to `\def\arraystretch{1.5}` by
+        // `expand_definitions`, then extracted (and stripped) here.
+        let expanded = expand_definitions(r"\renewcommand{\arraystretch}{1.5}x");
+        let (stripped, f) = extract_arraystretch(&expanded);
+        assert_eq!(f, Some(1.5));
+        assert_eq!(stripped, "x");
+
+        // A hand-written `\def\arraystretch{2}` is extracted directly.
+        let (stripped, f) = extract_arraystretch(r"\def\arraystretch{2}ab");
+        assert_eq!(f, Some(2.0));
+        assert_eq!(stripped, "ab");
+
+        // The latest redefinition wins.
+        let (_, f) = extract_arraystretch(r"\def\arraystretch{1.2}\def\arraystretch{3}");
+        assert_eq!(f, Some(3.0));
+
+        // No definition → unchanged source, no factor.
+        let (stripped, f) = extract_arraystretch(r"\begin{matrix}a\end{matrix}");
+        assert_eq!(f, None);
+        assert_eq!(stripped, r"\begin{matrix}a\end{matrix}");
     }
 }

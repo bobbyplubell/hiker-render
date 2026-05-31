@@ -1920,6 +1920,8 @@ dependencies = [
 name = "hiker-mermaid"
 version = "0.1.0"
 dependencies = [
+ "eframe",
+ "egui",
  "hiker-graph",
  "resvg",
 ]
@@ -4331,20 +4333,6 @@ dependencies = [
  "void",
  "walkdir",
  "web_atoms",
-]
-
-[[package]]
-name = "stylo-spike"
-version = "0.1.0"
-dependencies = [
- "app_units",
- "euclid",
- "markup5ever",
- "selectors",
- "stylo",
- "stylo_dom",
- "stylo_static_prefs",
- "url",
 ]
 
 [[package]]

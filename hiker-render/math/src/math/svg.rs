@@ -97,6 +97,21 @@ fn emit_box(svg: &mut String, b: &Box, face: &Face<'static>, x: f32, baseline: f
                 );
             }
         }
+        BoxKind::Fill { width, height, depth, color } => {
+            // A solid rectangle spanning the box's full bbox: from `height` px above
+            // the baseline down to `depth` px below it (SVG y grows down, so the top
+            // y is `baseline - height` and the rect is `height + depth` tall).
+            if *width > 0.0 && (*height + *depth) > 0.0 {
+                let (fill, opacity_attr) = fill_attrs(*color);
+                let y = baseline - height;
+                let h = height + depth;
+                let _ = write!(
+                    svg,
+                    "<rect x=\"{x}\" y=\"{y}\" width=\"{width}\" height=\"{h}\" \
+                     fill=\"{fill}\"{opacity_attr}/>",
+                );
+            }
+        }
         BoxKind::Hbox { children } => {
             for child in children {
                 // `dy` shifts the child's baseline downward (SVG y grows down).

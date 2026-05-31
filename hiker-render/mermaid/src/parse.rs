@@ -376,6 +376,12 @@ fn parse_edge_op(bytes: &[u8], pos: &mut usize) -> Option<ParsedEdge> {
         return Some(finish_edge(kind, saw_dot, arrow_start, arrow_end, label));
     }
 
+    // Position right after the left run (and its trailing whitespace). If the
+    // inline-label form below turns out not to apply (no closing run), we rewind
+    // here: the operator was a complete no-arrow edge (`A --- B`) and what we
+    // tentatively read as "text" is actually the target node.
+    let after_left_run = *pos;
+
     // No arrow yet. Either `|label|` follows, or it's `-- text -->`.
     if *pos < bytes.len() && bytes[*pos] == b'|' {
         label = extract_pipe_label(bytes, pos);
@@ -406,17 +412,18 @@ fn parse_edge_op(bytes: &[u8], pos: &mut usize) -> Option<ParsedEdge> {
         *pos += 1;
     }
     let text = std::str::from_utf8(&bytes[text_start..*pos]).ok()?.trim();
-    if !text.is_empty() {
-        label = Some(clean_label(text));
-    }
-    // Consume the closing run.
+    // Tentatively consume a closing run. The inline-label form (`-- text -->`)
+    // requires one; without it, this is a plain no-arrow edge and `text` is the
+    // target node, so we rewind to `after_left_run`.
     let mut d2 = false;
     let closing = consume_line_run(bytes, pos, line_ch, &mut d2);
+    if closing == 0 {
+        *pos = after_left_run;
+        return Some(finish_edge(kind, saw_dot, arrow_start, arrow_end, None));
+    }
     saw_dot = saw_dot || d2;
-    if closing == 0 && label.is_none() {
-        // Nothing closing and no label -> not actually an edge.
-        *pos = saved;
-        return None;
+    if !text.is_empty() {
+        label = Some(clean_label(text));
     }
     if *pos < bytes.len() && bytes[*pos] == b'>' {
         arrow_end = true;

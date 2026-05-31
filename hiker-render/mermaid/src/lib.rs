@@ -20,8 +20,14 @@ pub mod layout;
 pub mod measure;
 pub mod model;
 pub mod parse;
+// Additional diagram types. Each is self-contained (its own parse + draw, no
+// dagre layout) and exposes a `render_*` entry point.
+pub mod pie;
+pub mod sequence;
 
 pub use model::*;
+pub use pie::render_pie;
+pub use sequence::render_sequence;
 
 /// Rendering inputs (sizes, colors, fonts). Defaults approximate mermaid's
 /// light/default flowchart theme.
@@ -64,7 +70,7 @@ impl Default for MermaidOptions {
 }
 
 /// A rendered diagram: a self-contained SVG document plus its pixel size.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MermaidRender {
     pub svg: String,
     pub width_px: f32,
@@ -102,4 +108,31 @@ pub fn render_flowchart(src: &str, opts: &MermaidOptions) -> Result<MermaidRende
         width_px: diagram.width,
         height_px: diagram.height,
     })
+}
+
+/// Render any supported mermaid diagram, auto-detecting the type from the source
+/// header (`graph`/`flowchart` → flowchart, `pie` → pie chart, `sequenceDiagram`
+/// → sequence diagram). Returns [`MermaidError::Parse`] for an unknown/missing
+/// header.
+pub fn render(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, MermaidError> {
+    match diagram_keyword(src).as_deref() {
+        Some("graph") | Some("flowchart") => render_flowchart(src, opts),
+        Some("pie") => render_pie(src, opts),
+        Some("sequenceDiagram") => render_sequence(src, opts),
+        Some(other) => Err(MermaidError::Parse(format!("unknown diagram type: {other:?}"))),
+        None => Err(MermaidError::Parse("empty input / no diagram header".to_string())),
+    }
+}
+
+/// The first whitespace-delimited token of the first non-blank, non-`%%`-comment
+/// line — the diagram-type keyword.
+fn diagram_keyword(src: &str) -> Option<String> {
+    for raw in src.lines() {
+        let line = raw.split("%%").next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        return line.split_whitespace().next().map(str::to_string);
+    }
+    None
 }

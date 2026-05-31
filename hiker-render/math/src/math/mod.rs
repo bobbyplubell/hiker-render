@@ -497,6 +497,31 @@ mod tests {
             }
         }
 
+        // Layer-9 column/row-rule + substack-size samples, written to the
+        // workspace `target/` with the exact names the task asks for.
+        for (name, src, opts) in [
+            ("math-array-vrule", r"\begin{array}{c|c} a & b \\ c & d \end{array}", &display),
+            ("math-array-hline", r"\begin{array}{cc} a & b \\ \hline c & d \end{array}", &display),
+            ("math-substack-size", r"\sum_{\substack{0<i<n \\ i\ne k}} a_i", &display),
+            // Custom-bar `\genfrac` (a 2pt vinculum), `\colorbox`/`\fcolorbox`
+            // backgrounds + frame, and optically-attached accents over slanted
+            // bases — the polish-pass deliverables.
+            // pulldown 0.7 needs bare-token genfrac delimiters (`[]`), not braced.
+            ("math-genfrac", r"\genfrac[]{2pt}{}{a}{b}", &display),
+            (
+                "math-colorbox",
+                r"\colorbox{yellow}{x+1} + \fcolorbox{red}{lightgray}{y}",
+                &inline,
+            ),
+            ("math-accent-slant", r"\hat{f} + \vec{A}", &inline),
+        ] {
+            if let Some(out) = render_latex(src, opts) {
+                let path = format!("/home/bobby/projects/html-widget/target/{name}.svg");
+                let _ = std::fs::write(&path, &out.svg);
+                eprintln!("[math] wrote {path} ({} bytes)", out.svg.len());
+            }
+        }
+
         // A `\newcommand`-defined macro, rendered through the normal path.
         if let Some(out) = render_latex(
             r"\newcommand{\v}[1]{\vec{#1}}\v{F} = m\v{a}",
