@@ -26,7 +26,9 @@
 //! redefined. A node referenced before being shaped defaults to `Rect` with
 //! `label == id`.
 
-use crate::model::{Direction, EdgeKind, ElemStyle, FlowChart, FlowEdge, FlowNode, NodeShape};
+use crate::model::{
+    Direction, EdgeKind, ElemStyle, FlowChart, FlowEdge, FlowNode, NodeShape, Subgraph,
+};
 use std::collections::HashMap;
 
 /// Directive state collected during parsing, resolved onto nodes/edges at the
@@ -53,11 +55,15 @@ pub fn parse_flowchart(src: &str) -> Result<FlowChart, String> {
         direction: Direction::TopDown,
         nodes: Vec::new(),
         edges: Vec::new(),
+        subgraphs: Vec::new(),
     };
     // Tracks insertion index of each node id so we can update (last-wins) the
     // existing entry rather than appending a duplicate.
     let mut node_index: Vec<(String, usize)> = Vec::new();
     let mut directives = Directives::default();
+    // Stack of currently-open subgraph indices (into `chart.subgraphs`), innermost
+    // last. A node first seen while this is non-empty joins the innermost subgraph.
+    let mut subgraph_stack: Vec<usize> = Vec::new();
 
     let mut header_seen = false;
 
@@ -84,11 +90,316 @@ pub fn parse_flowchart(src: &str) -> Result<FlowChart, String> {
                 header_seen = true;
             }
 
-            parse_statement(stmt, &mut chart, &mut node_index);
+            // Subgraph block control: `subgraph …` opens a cluster (push), `end`
+            // closes the innermost one (pop). These bracket the statements between
+            // them; nodes first seen inside join the innermost open subgraph.
+            if let Some((id, title)) = parse_subgraph_open(stmt) {
+                let parent = subgraph_stack.last().copied();
+                let idx = chart.subgraphs.len();
+                chart.subgraphs.push(Subgraph {
+                    id,
+                    title,
+                    node_ids: Vec::new(),
+                    parent,
+                });
+                subgraph_stack.push(idx);
+                continue;
+            }
+            if stmt == "end" {
+                subgraph_stack.pop();
+                continue;
+            }
+            // `direction LR` inside a subgraph is parsed-and-ignored (the whole
+            // chart keeps its single top-level direction in this renderer).
+            if stmt.split_whitespace().next() == Some("direction") {
+                continue;
+            }
+
+            // Styling directives (`classDef`/`class`/`style`/`linkStyle`) are
+            // collected here and resolved after all statements are parsed.
+            if parse_directive(stmt, &mut directives) {
+                continue;
+            }
+
+            parse_statement(
+                stmt,
+                &mut chart,
+                &mut node_index,
+                &mut directives,
+                &subgraph_stack,
+            );
         }
     }
 
+    resolve_styles(&mut chart, &directives);
+
     Ok(chart)
+}
+
+/// Try to parse `stmt` as a styling directive, recording it into `dir`. Returns
+/// `true` if it was a (recognized) directive keyword line and should not be
+/// treated as a node/edge statement.
+fn parse_directive(stmt: &str, dir: &mut Directives) -> bool {
+    let mut words = stmt.split_whitespace();
+    let kw = match words.next() {
+        Some(k) => k,
+        None => return false,
+    };
+    match kw {
+        "classDef" => {
+            // classDef <name> <prop:val,...>
+            let rest = stmt[kw.len()..].trim_start();
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            if let Some(name) = parts.next().filter(|n| !n.is_empty()) {
+                let props = parts.next().unwrap_or("");
+                let style = parse_style_props(props);
+                dir.class_defs.insert(name.to_string(), style);
+            }
+            true
+        }
+        "class" => {
+            // class <id1>,<id2>,... <className>
+            let rest = stmt[kw.len()..].trim_start();
+            // Split off the trailing class name (last whitespace-delimited token).
+            if let Some(sp) = rest.rfind(char::is_whitespace) {
+                let ids = rest[..sp].trim();
+                let class_name = rest[sp..].trim();
+                if !class_name.is_empty() {
+                    for id in ids.split(',') {
+                        let id = id.trim();
+                        if !id.is_empty() {
+                            dir.class_assignments
+                                .push((id.to_string(), class_name.to_string()));
+                        }
+                    }
+                }
+            }
+            true
+        }
+        "style" => {
+            // style <id> <prop:val,...>
+            let rest = stmt[kw.len()..].trim_start();
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            if let Some(id) = parts.next().filter(|n| !n.is_empty()) {
+                let props = parts.next().unwrap_or("");
+                dir.node_inline
+                    .push((id.to_string(), parse_style_props(props)));
+            }
+            true
+        }
+        "linkStyle" => {
+            // linkStyle <n[,m,...]|default> <prop:val,...>
+            let rest = stmt[kw.len()..].trim_start();
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            if let Some(sel) = parts.next().filter(|n| !n.is_empty()) {
+                let props = parts.next().unwrap_or("");
+                let style = parse_style_props(props);
+                if sel == "default" {
+                    dir.edge_default.push(style);
+                } else {
+                    for tok in sel.split(',') {
+                        if let Ok(n) = tok.trim().parse::<usize>() {
+                            dir.edge_inline.push((n, style.clone()));
+                        }
+                    }
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Resolve collected directives onto the chart's nodes and edges. Apply order
+/// (mermaid): the `class`/`:::` classDef style first, then inline `style`/
+/// `linkStyle` overrides on top (field-by-field).
+fn resolve_styles(chart: &mut FlowChart, dir: &Directives) {
+    // Nodes: classDef-via-class first.
+    for (id, class_name) in &dir.class_assignments {
+        if let Some(class_style) = dir.class_defs.get(class_name) {
+            if let Some(n) = chart.nodes.iter_mut().find(|n| n.id == *id) {
+                merge_style(&mut n.style, class_style);
+            }
+        }
+    }
+    // Nodes: inline `style` overrides on top.
+    for (id, style) in &dir.node_inline {
+        if let Some(n) = chart.nodes.iter_mut().find(|n| n.id == *id) {
+            merge_style(&mut n.style, style);
+        }
+    }
+    // Edges: `linkStyle default` first (broadest), then per-index.
+    for style in &dir.edge_default {
+        for e in chart.edges.iter_mut() {
+            merge_style(&mut e.style, style);
+        }
+    }
+    for (n, style) in &dir.edge_inline {
+        if let Some(e) = chart.edges.get_mut(*n) {
+            merge_style(&mut e.style, style);
+        }
+    }
+}
+
+/// Merge `src` into `dst` field-by-field: any `Some`/true field in `src`
+/// overrides `dst` (so later/inline styles win over earlier/class styles).
+fn merge_style(dst: &mut ElemStyle, src: &ElemStyle) {
+    if src.fill.is_some() {
+        dst.fill = src.fill;
+    }
+    if src.stroke.is_some() {
+        dst.stroke = src.stroke;
+    }
+    if src.stroke_width.is_some() {
+        dst.stroke_width = src.stroke_width;
+    }
+    if src.text_color.is_some() {
+        dst.text_color = src.text_color;
+    }
+    if src.dashed {
+        dst.dashed = true;
+    }
+}
+
+/// Parse a comma-separated `prop:val,prop:val,...` list into an [`ElemStyle`].
+/// Unknown props or unparseable colors are skipped leniently.
+fn parse_style_props(props: &str) -> ElemStyle {
+    let mut style = ElemStyle::default();
+    for part in props.split(',') {
+        let part = part.trim();
+        let (key, val) = match part.split_once(':') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+        match key {
+            "fill" => {
+                if let Some(c) = parse_color(val) {
+                    style.fill = Some(c);
+                }
+            }
+            "stroke" => {
+                if let Some(c) = parse_color(val) {
+                    style.stroke = Some(c);
+                }
+            }
+            "color" => {
+                if let Some(c) = parse_color(val) {
+                    style.text_color = Some(c);
+                }
+            }
+            "stroke-width" => {
+                if let Some(w) = parse_width(val) {
+                    style.stroke_width = Some(w);
+                }
+            }
+            "stroke-dasharray" => {
+                if !val.is_empty() {
+                    style.dashed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    style
+}
+
+/// Parse a stroke width like `2px` / `4` / `1.5` into an f32 (px).
+fn parse_width(val: &str) -> Option<f32> {
+    let v = val.trim().trim_end_matches("px").trim();
+    v.parse::<f32>().ok()
+}
+
+/// Parse a CSS-ish color into straight RGBA: `#rgb`, `#rrggbb`, `#rrggbbaa`,
+/// `rgb(r,g,b)`, `rgba(r,g,b,a)`, or a small set of named colors. Returns `None`
+/// on anything unrecognized so the caller can skip the prop.
+fn parse_color(s: &str) -> Option<[u8; 4]> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        return parse_hex_color(hex);
+    }
+    if let Some(inner) = s.strip_prefix("rgba(").and_then(|x| x.strip_suffix(')')) {
+        return parse_rgb_func(inner, true);
+    }
+    if let Some(inner) = s.strip_prefix("rgb(").and_then(|x| x.strip_suffix(')')) {
+        return parse_rgb_func(inner, false);
+    }
+    parse_named_color(s)
+}
+
+/// Parse the body of a `#...` hex color (3/6/8 hex digits).
+fn parse_hex_color(hex: &str) -> Option<[u8; 4]> {
+    let h = hex.trim();
+    match h.len() {
+        3 => {
+            let r = u8::from_str_radix(&h[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&h[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&h[2..3], 16).ok()?;
+            // Expand each nibble (e.g. f -> ff).
+            Some([r * 17, g * 17, b * 17, 255])
+        }
+        6 => {
+            let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+            Some([r, g, b, 255])
+        }
+        8 => {
+            let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+            let a = u8::from_str_radix(&h[6..8], 16).ok()?;
+            Some([r, g, b, a])
+        }
+        _ => None,
+    }
+}
+
+/// Parse the inside of `rgb(...)`/`rgba(...)`. When `with_alpha`, the 4th
+/// component is a 0..1 (or 0..255) alpha; we accept a 0..1 float or a 0..255 int.
+fn parse_rgb_func(inner: &str, with_alpha: bool) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+    let need = if with_alpha { 4 } else { 3 };
+    if parts.len() != need {
+        return None;
+    }
+    let r = parts[0].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let g = parts[1].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let b = parts[2].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let a = if with_alpha {
+        let av = parts[3].parse::<f32>().ok()?;
+        if av <= 1.0 {
+            (av * 255.0).round().clamp(0.0, 255.0) as u8
+        } else {
+            av.round().clamp(0.0, 255.0) as u8
+        }
+    } else {
+        255
+    };
+    Some([r, g, b, a])
+}
+
+/// Map a small set of CSS named colors to RGBA.
+fn parse_named_color(name: &str) -> Option<[u8; 4]> {
+    let c = match name.to_ascii_lowercase().as_str() {
+        "red" => [255, 0, 0],
+        "green" => [0, 128, 0],
+        "blue" => [0, 0, 255],
+        "black" => [0, 0, 0],
+        "white" => [255, 255, 255],
+        "yellow" => [255, 255, 0],
+        "orange" => [255, 165, 0],
+        "purple" => [128, 0, 128],
+        "gray" | "grey" => [128, 128, 128],
+        "lightblue" => [173, 216, 230],
+        "lightgreen" => [144, 238, 144],
+        "pink" => [255, 192, 203],
+        "cyan" => [0, 255, 255],
+        "magenta" => [255, 0, 255],
+        "brown" => [165, 42, 42],
+        "lightgray" | "lightgrey" => [211, 211, 211],
+        _ => return None,
+    };
+    Some([c[0], c[1], c[2], 255])
 }
 
 /// Strip a `%% ...` comment from a single source line.
@@ -114,6 +425,44 @@ fn parse_header(stmt: &str) -> Option<Direction> {
     Some(dir)
 }
 
+/// If `stmt` opens a subgraph block, return its `(id, title)`. Forms:
+/// - `subgraph <id>[<Title>]` — explicit id + bracketed title.
+/// - `subgraph <id>` — id only; title = id.
+/// - `subgraph "Title"` / `subgraph <Title>` — no brackets; the token(s) form
+///   both the title and (for a single bare word) the id.
+fn parse_subgraph_open(stmt: &str) -> Option<(String, String)> {
+    let rest = stmt.strip_prefix("subgraph")?;
+    // Must be a word boundary: `subgraph` followed by whitespace or end-of-line.
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        // Anonymous subgraph: id/title derived from declaration order by caller's
+        // index; use an empty title so no label is drawn.
+        return Some((String::new(), String::new()));
+    }
+
+    // `<id>[<Title>]` — id is the leading id-chars before a `[`.
+    if let Some(br) = rest.find('[') {
+        let id = rest[..br].trim();
+        if rest.ends_with(']') {
+            let title = clean_label(rest[br + 1..rest.len() - 1].trim());
+            return Some((id.to_string(), title));
+        }
+    }
+
+    // `"Title"` — quoted title; id derived as the title text (no separate id).
+    if rest.starts_with('"') {
+        let title = clean_label(rest);
+        return Some((title.clone(), title));
+    }
+
+    // Bare `<id>` (single token) → title = id. Multi-word bare title → id = whole
+    // text, title = whole text.
+    Some((rest.to_string(), rest.to_string()))
+}
+
 /// Map a direction token to a [`Direction`].
 fn parse_direction(tok: &str) -> Option<Direction> {
     match tok {
@@ -128,16 +477,22 @@ fn parse_direction(tok: &str) -> Option<Direction> {
 /// Parse one statement (a single `;`/newline-delimited unit). Handles both
 /// standalone node declarations and edge chains. Lenient: bails silently on
 /// anything it can't make sense of.
-fn parse_statement(stmt: &str, chart: &mut FlowChart, node_index: &mut Vec<(String, usize)>) {
+fn parse_statement(
+    stmt: &str,
+    chart: &mut FlowChart,
+    node_index: &mut Vec<(String, usize)>,
+    dir: &mut Directives,
+    subgraph_stack: &[usize],
+) {
     let bytes = stmt.as_bytes();
     let mut pos = 0usize;
 
     // First node ref is required for any statement we care about.
-    let first = match parse_node_ref(bytes, &mut pos) {
+    let first = match parse_node_ref(bytes, &mut pos, dir) {
         Some(n) => n,
         None => return,
     };
-    upsert_node(chart, node_index, first.clone());
+    upsert_node(chart, node_index, first.clone(), subgraph_stack);
 
     let mut prev_id = first.id;
 
@@ -152,12 +507,12 @@ fn parse_statement(stmt: &str, chart: &mut FlowChart, node_index: &mut Vec<(Stri
             None => break, // not an edge here; stop (lenient)
         };
         skip_ws(bytes, &mut pos);
-        let target = match parse_node_ref(bytes, &mut pos) {
+        let target = match parse_node_ref(bytes, &mut pos, dir) {
             Some(n) => n,
             None => break, // edge with no target; drop it (lenient)
         };
         let target_id = target.id.clone();
-        upsert_node(chart, node_index, target);
+        upsert_node(chart, node_index, target, subgraph_stack);
 
         chart.edges.push(FlowEdge {
             from: prev_id.clone(),
@@ -191,8 +546,14 @@ impl Clone for ParsedNode {
 
 /// Insert or update (last-wins for shape/label) a node into the chart, keeping
 /// first-seen ordering.
-fn upsert_node(chart: &mut FlowChart, node_index: &mut Vec<(String, usize)>, parsed: ParsedNode) {
+fn upsert_node(
+    chart: &mut FlowChart,
+    node_index: &mut Vec<(String, usize)>,
+    parsed: ParsedNode,
+    subgraph_stack: &[usize],
+) {
     let existing = node_index.iter().find(|(id, _)| *id == parsed.id).map(|(_, i)| *i);
+    let is_new = existing.is_none();
     match existing {
         Some(i) => {
             // Only override shape/label when this ref actually carried one.
@@ -209,7 +570,16 @@ fn upsert_node(chart: &mut FlowChart, node_index: &mut Vec<(String, usize)>, par
                 label,
                 shape: parsed.shape, style: crate::model::ElemStyle::default(),
             });
-            node_index.push((parsed.id, idx));
+            node_index.push((parsed.id.clone(), idx));
+        }
+    }
+
+    // A node first seen inside a subgraph block belongs to the innermost open
+    // subgraph. Membership is keyed on first-seen so a node declared in one
+    // subgraph but referenced from another stays in its original subgraph.
+    if is_new {
+        if let Some(&sg) = subgraph_stack.last() {
+            chart.subgraphs[sg].node_ids.push(parsed.id);
         }
     }
 }
@@ -223,7 +593,7 @@ fn is_id_char(c: u8) -> bool {
 
 /// Parse a node ref at `pos`: an identifier optionally followed by a shape
 /// bracket group. Advances `pos` past it. Returns `None` if no id is present.
-fn parse_node_ref(bytes: &[u8], pos: &mut usize) -> Option<ParsedNode> {
+fn parse_node_ref(bytes: &[u8], pos: &mut usize, dir: &mut Directives) -> Option<ParsedNode> {
     skip_ws(bytes, pos);
     let start = *pos;
     while *pos < bytes.len() && is_id_char(bytes[*pos]) {
@@ -237,6 +607,22 @@ fn parse_node_ref(bytes: &[u8], pos: &mut usize) -> Option<ParsedNode> {
     // Optional shape group immediately after the id (no space allowed between
     // id and the opening bracket, matching mermaid).
     let (label, shape) = parse_shape(bytes, pos);
+
+    // Optional `:::className` shorthand (after the id and any shape group).
+    // Record the class to apply once classDefs are known.
+    if starts_with(bytes, *pos, b":::") {
+        *pos += 3;
+        let name_start = *pos;
+        while *pos < bytes.len() && is_id_char(bytes[*pos]) {
+            *pos += 1;
+        }
+        if *pos > name_start {
+            if let Ok(name) = std::str::from_utf8(&bytes[name_start..*pos]) {
+                dir.class_assignments.push((id.clone(), name.to_string()));
+            }
+        }
+    }
+
     Some(ParsedNode { id, label, shape })
 }
 
@@ -808,5 +1194,229 @@ mod tests {
         assert!(c.nodes.is_empty());
         assert!(c.edges.is_empty());
         assert_eq!(c.direction, Direction::TopDown);
+    }
+
+    // ── Styling directives ─────────────────────────────────────────────────
+
+    #[test]
+    fn color_parser_forms() {
+        assert_eq!(parse_color("#f00"), Some([255, 0, 0, 255]));
+        assert_eq!(parse_color("#00ff00"), Some([0, 255, 0, 255]));
+        assert_eq!(parse_color("#0000ff80"), Some([0, 0, 255, 128]));
+        assert_eq!(parse_color("rgb(1,2,3)"), Some([1, 2, 3, 255]));
+        assert_eq!(parse_color("rgba(1,2,3,0.5)"), Some([1, 2, 3, 128]));
+        assert_eq!(parse_color("red"), Some([255, 0, 0, 255]));
+        assert_eq!(parse_color("RED"), Some([255, 0, 0, 255]));
+        assert_eq!(parse_color("notacolor"), None);
+    }
+
+    #[test]
+    fn width_parser() {
+        assert_eq!(parse_width("2px"), Some(2.0));
+        assert_eq!(parse_width("4"), Some(4.0));
+        assert_eq!(parse_width("1.5"), Some(1.5));
+    }
+
+    #[test]
+    fn classdef_and_class_apply() {
+        let c = parse(
+            "graph TD\n\
+             A --> B\n\
+             classDef hot fill:#f00,stroke:#900,stroke-width:3px\n\
+             class A hot",
+        );
+        let a = node(&c, "A");
+        assert_eq!(a.style.fill, Some([255, 0, 0, 255]));
+        assert!(a.style.stroke.is_some());
+        assert_eq!(a.style.stroke_width, Some(3.0));
+        // B untouched.
+        assert_eq!(node(&c, "B").style, ElemStyle::default());
+    }
+
+    #[test]
+    fn classdef_defined_after_class_still_resolves() {
+        // Two-pass: `class` references `hot` before its classDef appears.
+        let c = parse(
+            "graph TD\n\
+             class A hot\n\
+             A --> B\n\
+             classDef hot fill:#0f0",
+        );
+        assert_eq!(node(&c, "A").style.fill, Some([0, 255, 0, 255]));
+    }
+
+    #[test]
+    fn class_shorthand_triple_colon() {
+        let c = parse(
+            "graph TD\n\
+             A:::hot --> B\n\
+             classDef hot fill:#f00",
+        );
+        assert_eq!(node(&c, "A").style.fill, Some([255, 0, 0, 255]));
+        // A is still a normal node with an edge to B.
+        assert_eq!(c.edges.len(), 1);
+        assert_eq!((c.edges[0].from.as_str(), c.edges[0].to.as_str()), ("A", "B"));
+    }
+
+    #[test]
+    fn class_shorthand_with_shape() {
+        let c = parse(
+            "graph TD\n\
+             A[Start]:::hot --> B\n\
+             classDef hot fill:#0000ff",
+        );
+        assert_eq!(node(&c, "A").label, "Start");
+        assert_eq!(node(&c, "A").style.fill, Some([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn style_directive_direct() {
+        let c = parse("graph TD\nA --> B\nstyle B fill:#0f0");
+        assert_eq!(node(&c, "B").style.fill, Some([0, 255, 0, 255]));
+    }
+
+    #[test]
+    fn style_overrides_class() {
+        // Inline `style` wins over `class` (applied on top).
+        let c = parse(
+            "graph TD\n\
+             A --> B\n\
+             classDef hot fill:#f00\n\
+             class A hot\n\
+             style A fill:#00f",
+        );
+        assert_eq!(node(&c, "A").style.fill, Some([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn linkstyle_sets_edge() {
+        let c = parse("graph TD\nA --> B\nlinkStyle 0 stroke:#00f");
+        assert_eq!(c.edges[0].style.stroke, Some([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn linkstyle_default_and_multi_index() {
+        let c = parse(
+            "graph TD\n\
+             A --> B\n\
+             B --> C\n\
+             linkStyle default stroke:#000\n\
+             linkStyle 0,1 stroke-width:4px",
+        );
+        assert_eq!(c.edges[0].style.stroke, Some([0, 0, 0, 255]));
+        assert_eq!(c.edges[1].style.stroke, Some([0, 0, 0, 255]));
+        assert_eq!(c.edges[0].style.stroke_width, Some(4.0));
+        assert_eq!(c.edges[1].style.stroke_width, Some(4.0));
+    }
+
+    #[test]
+    fn dasharray_sets_dashed() {
+        let c = parse("graph TD\nA --> B\nstyle A stroke-dasharray:5 5");
+        assert!(node(&c, "A").style.dashed);
+    }
+
+    #[test]
+    fn unknown_color_prop_skipped() {
+        let c = parse("graph TD\nA --> B\nstyle A fill:notacolor,stroke:#f00");
+        assert_eq!(node(&c, "A").style.fill, None);
+        assert_eq!(node(&c, "A").style.stroke, Some([255, 0, 0, 255]));
+    }
+
+    // ── Subgraphs ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn subgraph_groups_members_titled() {
+        let c = parse(
+            "flowchart TD\n\
+             subgraph one [Group One]\n\
+             A --> B\n\
+             end\n\
+             B --> C",
+        );
+        assert_eq!(c.subgraphs.len(), 1);
+        let sg = &c.subgraphs[0];
+        assert_eq!(sg.id, "one");
+        assert_eq!(sg.title, "Group One");
+        assert_eq!(sg.node_ids, vec!["A", "B"]);
+        assert!(sg.parent.is_none());
+        // C is top-level (declared outside the subgraph block).
+        assert!(!sg.node_ids.contains(&"C".to_string()));
+        // Nodes & edges still parse normally.
+        let ids: Vec<&str> = c.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B", "C"]);
+        assert_eq!(c.edges.len(), 2);
+    }
+
+    #[test]
+    fn subgraph_bare_id_uses_id_as_title() {
+        let c = parse("flowchart TD\nsubgraph svc\nA --> B\nend");
+        assert_eq!(c.subgraphs.len(), 1);
+        assert_eq!(c.subgraphs[0].id, "svc");
+        assert_eq!(c.subgraphs[0].title, "svc");
+        assert_eq!(c.subgraphs[0].node_ids, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn subgraph_quoted_title() {
+        let c = parse("flowchart TD\nsubgraph \"My Title\"\nA --> B\nend");
+        assert_eq!(c.subgraphs.len(), 1);
+        assert_eq!(c.subgraphs[0].title, "My Title");
+    }
+
+    #[test]
+    fn nested_subgraphs_set_parent() {
+        let c = parse(
+            "flowchart TD\n\
+             subgraph outer [Outer]\n\
+             A --> B\n\
+             subgraph inner [Inner]\n\
+             C --> D\n\
+             end\n\
+             end",
+        );
+        assert_eq!(c.subgraphs.len(), 2);
+        let outer = &c.subgraphs[0];
+        let inner = &c.subgraphs[1];
+        assert_eq!(outer.title, "Outer");
+        assert_eq!(outer.node_ids, vec!["A", "B"]);
+        assert!(outer.parent.is_none());
+        assert_eq!(inner.title, "Inner");
+        assert_eq!(inner.node_ids, vec!["C", "D"]);
+        // inner's parent is the index of `outer` (0).
+        assert_eq!(inner.parent, Some(0));
+    }
+
+    #[test]
+    fn direction_inside_subgraph_ignored() {
+        let c = parse(
+            "flowchart TD\n\
+             subgraph one\n\
+             direction LR\n\
+             A --> B\n\
+             end",
+        );
+        // Whole-chart direction is unchanged; direction line creates no node.
+        assert_eq!(c.direction, Direction::TopDown);
+        assert_eq!(c.subgraphs[0].node_ids, vec!["A", "B"]);
+        let ids: Vec<&str> = c.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn no_subgraph_chart_has_no_subgraphs() {
+        let c = parse("flowchart TD\nA --> B --> C");
+        assert!(c.subgraphs.is_empty());
+    }
+
+    #[test]
+    fn directives_do_not_create_phantom_nodes() {
+        let c = parse(
+            "graph TD\n\
+             A --> B\n\
+             classDef hot fill:#f00\n\
+             class A hot",
+        );
+        let ids: Vec<&str> = c.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B"]);
     }
 }

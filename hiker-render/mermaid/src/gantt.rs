@@ -72,6 +72,90 @@ struct Gantt {
     title: Option<String>,
     sections: Vec<String>,
     tasks: Vec<Task>,
+    /// Days the schedule skips (weekends / named weekdays / specific dates).
+    excludes: Excludes,
+}
+
+/// The set of excluded ("non-working") days, parsed from one or more `excludes`
+/// directives. `is_excluded(day)` is the predicate task durations step over and
+/// the renderer shades. When empty (the common case) it is a pure no-op, so a
+/// chart with no `excludes` directive renders byte-identically to before.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Excludes {
+    /// Excluded weekdays, indexed by [`weekday`] (0 = Monday .. 6 = Sunday).
+    weekdays: [bool; 7],
+    /// Excluded specific day numbers (proleptic Gregorian day count).
+    dates: std::collections::BTreeSet<i64>,
+}
+
+impl Excludes {
+    /// `true` when the schedule treats `day` as a non-working day.
+    fn is_excluded(&self, day: i64) -> bool {
+        self.weekdays[weekday(day) as usize] || self.dates.contains(&day)
+    }
+
+    /// Whether any day is excluded; used to skip excludes work cheaply.
+    fn is_empty(&self) -> bool {
+        self.weekdays.iter().all(|&b| !b) && self.dates.is_empty()
+    }
+
+    /// Merge the tokens of one `excludes <list>` directive (comma/space
+    /// separated) into this set. Recognises `weekends`, weekday names
+    /// (`monday`..`sunday`), and `YYYY-MM-DD` dates; anything else is ignored.
+    fn add_directive(&mut self, list: &str) {
+        for tok in list.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
+            let lower = tok.to_ascii_lowercase();
+            match lower.as_str() {
+                "weekends" => {
+                    // Saturday + Sunday.
+                    self.weekdays[5] = true;
+                    self.weekdays[6] = true;
+                }
+                "monday" => self.weekdays[0] = true,
+                "tuesday" => self.weekdays[1] = true,
+                "wednesday" => self.weekdays[2] = true,
+                "thursday" => self.weekdays[3] = true,
+                "friday" => self.weekdays[4] = true,
+                "saturday" => self.weekdays[5] = true,
+                "sunday" => self.weekdays[6] = true,
+                _ => {
+                    if let Some(day) = parse_date(tok) {
+                        self.dates.insert(day);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Day of week for a day number: 0 = Monday .. 6 = Sunday. Derived from the fact
+/// that 2024-01-06 is a Saturday (its day number mod 7 fixes the offset), so the
+/// mapping stays correct against [`ymd_to_day`]'s arbitrary epoch.
+fn weekday(day: i64) -> i64 {
+    // `ymd_to_day(2024, 1, 6) % 7 == 5` and that date is a Saturday, which we
+    // want to be index 5; so the raw `day % 7` already lands Monday at 0.
+    debug_assert_eq!(ymd_to_day(2024, 1, 6).rem_euclid(7), 5);
+    day.rem_euclid(7)
+}
+
+/// Step forward from `start` over enough calendar days to contain `n` non-excluded
+/// ("working") days, returning the resulting end day. The span is half-open:
+/// `[start, end)` contains exactly `n` working days. With no excludes (or a
+/// fractional/zero `n`) this is just `start + n`, preserving the old behavior.
+fn step_working_days(start: f64, n: f64, ex: &Excludes) -> f64 {
+    // Sub-day durations (`Nh`) and the empty-excludes case keep exact arithmetic.
+    if ex.is_empty() || n <= 0.0 || n.fract() != 0.0 {
+        return start + n;
+    }
+    let mut remaining = n as i64;
+    let mut cur = start as i64;
+    while remaining > 0 {
+        if !ex.is_excluded(cur) {
+            remaining -= 1;
+        }
+        cur += 1;
+    }
+    cur as f64
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +263,7 @@ fn parse_gantt(src: &str) -> Result<Gantt, String> {
     let mut title: Option<String> = None;
     let mut sections: Vec<String> = Vec::new();
     let mut raws: Vec<RawTask> = Vec::new();
+    let mut excludes = Excludes::default();
     // Current section index. Tasks before any `section` land in a synthesised
     // default section, created lazily on the first such task.
     let mut cur_section: Option<usize> = None;
@@ -210,9 +295,12 @@ fn parse_gantt(src: &str) -> Result<Gantt, String> {
             title = Some(t.to_string());
             continue;
         }
+        if let Some(list) = directive(line, "excludes") {
+            excludes.add_directive(list);
+            continue;
+        }
         if directive(line, "dateFormat").is_some()
             || directive(line, "axisFormat").is_some()
-            || directive(line, "excludes").is_some()
             || directive(line, "todayMarker").is_some()
             || directive(line, "tickInterval").is_some()
             || directive(line, "weekday").is_some()
@@ -253,11 +341,12 @@ fn parse_gantt(src: &str) -> Result<Gantt, String> {
         return Err("empty input / no 'gantt' header".to_string());
     }
 
-    let tasks = resolve_tasks(&raws);
+    let tasks = resolve_tasks(&raws, &excludes);
     Ok(Gantt {
         title,
         sections,
         tasks,
+        excludes,
     })
 }
 
@@ -359,7 +448,7 @@ fn parse_task_meta(name: String, section: usize, meta: &str) -> Result<RawTask, 
 /// `after <id>` resolves against earlier tasks (by id); an omitted start follows
 /// the previous task's end (0 for the first). Unknown `after` ids fall back to
 /// the previous-task rule.
-fn resolve_tasks(raws: &[RawTask]) -> Vec<Task> {
+fn resolve_tasks(raws: &[RawTask], ex: &Excludes) -> Vec<Task> {
     // Map id → end day, filled as we go so forward references degrade gracefully.
     let mut end_by_id: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
     let mut tasks: Vec<Task> = Vec::with_capacity(raws.len());
@@ -373,9 +462,12 @@ fn resolve_tasks(raws: &[RawTask]) -> Vec<Task> {
         };
 
         let end = match rt.status {
-            // A milestone is a zero-width marker at its start.
+            // A milestone is a zero-width marker at its start (excludes never move
+            // it).
             Status::Milestone => start,
-            _ => start + rt.duration.unwrap_or(0.0),
+            // A duration spans forward over `n` working days, stepping over any
+            // excluded calendar days in between (no-op when `ex` is empty).
+            _ => step_working_days(start, rt.duration.unwrap_or(0.0), ex),
         };
 
         if let Some(id) = &rt.id {
@@ -551,6 +643,32 @@ pub fn render_gantt(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
                 x = MARGIN + 6.0,
                 family = escape(&opts.font_family),
                 txt = escape(label),
+            );
+        }
+    }
+
+    // ---- Excluded-day shading: a faint vertical band per skipped day -------
+    // Drawn over the section bands but under the gridlines/bars so excluded days
+    // read as lightly greyed-out columns spanning the whole grid.
+    if !gantt.excludes.is_empty() {
+        let first = min_day.floor() as i64;
+        let last = max_day.ceil() as i64;
+        // Faint grey band; subtle so bars/text stay readable.
+        let band = [120u8, 120u8, 120u8, 36u8];
+        for day in first..last {
+            if !gantt.excludes.is_excluded(day) {
+                continue;
+            }
+            let bx = day_to_x(day as f64);
+            let _ = write!(
+                svg,
+                "<rect x=\"{bx:.2}\" y=\"{y:.2}\" width=\"{bw:.2}\" height=\"{bh:.2}\" \
+                 fill=\"{fill}\"{op}/>",
+                y = grid_top,
+                bw = day_width,
+                bh = grid_h,
+                fill = rgb(band),
+                op = opacity_attr("fill-opacity", band),
             );
         }
     }
@@ -738,7 +856,6 @@ mod tests {
     const SAMPLE: &str = r#"gantt
     title A Gantt Diagram
     dateFormat YYYY-MM-DD
-    excludes weekends
     section Design
     Design task     :done, des1, 2014-01-06, 5d
     Implement       :active, imp1, after des1, 10d
@@ -981,5 +1098,132 @@ mod tests {
         assert_ne!(done, active);
         assert_ne!(active, crit);
         assert_ne!(done, crit);
+    }
+
+    // ---- excludes ---------------------------------------------------------
+
+    #[test]
+    fn weekday_and_weekend_detection() {
+        // 2024-01-06 is a Saturday, 2024-01-08 a Monday.
+        let sat = parse_date("2024-01-06").unwrap();
+        let sun = parse_date("2024-01-07").unwrap();
+        let mon = parse_date("2024-01-08").unwrap();
+        let fri = parse_date("2024-01-12").unwrap();
+        assert_eq!(weekday(mon), 0, "Monday is index 0");
+        assert_eq!(weekday(fri), 4, "Friday is index 4");
+        assert_eq!(weekday(sat), 5, "Saturday is index 5");
+        assert_eq!(weekday(sun), 6, "Sunday is index 6");
+
+        let mut ex = Excludes::default();
+        ex.add_directive("weekends");
+        assert!(ex.is_excluded(sat), "Saturday excluded");
+        assert!(ex.is_excluded(sun), "Sunday excluded");
+        assert!(!ex.is_excluded(mon), "Monday not excluded");
+        assert!(!ex.is_excluded(fri), "Friday not excluded");
+    }
+
+    #[test]
+    fn excludes_directive_parses_dates_and_names() {
+        let g = parse_gantt(
+            "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends, 2024-01-10 monday\nA :2024-01-08, 1d\n",
+        )
+        .expect("parse");
+        let mon = parse_date("2024-01-08").unwrap();
+        let wed = parse_date("2024-01-10").unwrap();
+        let sat = parse_date("2024-01-06").unwrap();
+        assert!(g.excludes.is_excluded(sat), "weekend");
+        assert!(g.excludes.is_excluded(wed), "specific date 2024-01-10");
+        assert!(g.excludes.is_excluded(mon), "monday name");
+    }
+
+    #[test]
+    fn duration_skips_excluded_weekends() {
+        // A 5d task Mon 2024-01-08 fits Mon..Fri (5 working days), so it ends on
+        // the Saturday — same calendar span as no-excludes, but for the right
+        // reason (Friday is the 5th working day).
+        let g = parse_gantt(
+            "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends\nA :2024-01-08, 5d\n",
+        )
+        .expect("parse");
+        let start = parse_date("2024-01-08").unwrap() as f64;
+        assert_eq!(g.tasks[0].start_day, start);
+        assert_eq!(g.tasks[0].end_day, start + 5.0);
+        assert_eq!(day_to_ymd(g.tasks[0].end_day as i64), (2024, 1, 13));
+
+        // A 7d task Mon 2024-01-08 must span the intervening Sat+Sun: it needs 9
+        // calendar days to cover 7 working days, ending Wed 2024-01-17.
+        let g7 = parse_gantt(
+            "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends\nA :2024-01-08, 7d\n",
+        )
+        .expect("parse");
+        let s7 = parse_date("2024-01-08").unwrap() as f64;
+        assert_eq!(g7.tasks[0].end_day, s7 + 9.0, "7 working days span 9 days");
+        assert_eq!(day_to_ymd(g7.tasks[0].end_day as i64), (2024, 1, 17));
+
+        // Without excludes the same 7d task ends 7 calendar days later.
+        let g_no = parse_gantt(
+            "gantt\ndateFormat YYYY-MM-DD\nA :2024-01-08, 7d\n",
+        )
+        .expect("parse");
+        assert_eq!(g_no.tasks[0].end_day, s7 + 7.0);
+        assert!(
+            g7.tasks[0].end_day > g_no.tasks[0].end_day,
+            "excludes lengthen the calendar span"
+        );
+    }
+
+    #[test]
+    fn duration_skips_specific_excluded_date() {
+        // 2024-01-10 (a Wednesday) is excluded, so a 5d task from Mon 2024-01-08
+        // needs an extra calendar day to cover 5 working days.
+        let g = parse_gantt(
+            "gantt\ndateFormat YYYY-MM-DD\nexcludes 2024-01-10\nA :2024-01-08, 5d\n",
+        )
+        .expect("parse");
+        let start = parse_date("2024-01-08").unwrap() as f64;
+        assert_eq!(g.tasks[0].end_day, start + 6.0);
+        assert_eq!(day_to_ymd(g.tasks[0].end_day as i64), (2024, 1, 14));
+    }
+
+    #[test]
+    fn no_excludes_is_unchanged() {
+        // The byte-for-byte output with no `excludes` directive must match what an
+        // explicit empty excludes set produces, and contain no shading band.
+        let opts = MermaidOptions::default();
+        let r = render_gantt(SAMPLE, &opts).expect("render");
+        // Grey shading band fill (used only for excluded days) must be absent.
+        assert!(
+            !r.svg.contains("fill=\"rgb(120,120,120)\""),
+            "no excludes => no shading bands"
+        );
+        // Durations are plain calendar arithmetic.
+        let g = parse_gantt(SAMPLE).expect("parse");
+        let start = parse_date("2014-01-06").unwrap() as f64;
+        assert_eq!(g.tasks[0].end_day, start + 5.0);
+    }
+
+    #[test]
+    fn excludes_render_has_shading_bands() {
+        let opts = MermaidOptions::default();
+        let src = "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends\n\
+                   A :2024-01-08, 14d\n";
+        let r = render_gantt(src, &opts).expect("render");
+        // At least one faint grey shading band for the weekend columns.
+        assert!(
+            r.svg.contains("fill=\"rgb(120,120,120)\""),
+            "excluded-day shading bands present, got: {}",
+            r.svg
+        );
+    }
+
+    #[test]
+    fn milestone_unaffected_by_excludes() {
+        let g = parse_gantt(
+            "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends\nM :milestone, m1, 2024-01-06, 0d\n",
+        )
+        .expect("parse");
+        let day = parse_date("2024-01-06").unwrap() as f64;
+        assert_eq!(g.tasks[0].start_day, day);
+        assert_eq!(g.tasks[0].end_day, day, "milestone stays zero-width on a weekend");
     }
 }

@@ -24,9 +24,17 @@ pub mod svgutil;
 // Additional diagram types. Each is self-contained (its own parse + draw) and
 // exposes a `render_*` entry point. Some use the `hiker_graph` layered (dagre)
 // layout (state/er/class) or tree/radial layout (mindmap); the rest self-lay-out.
+pub mod architecture;
 pub mod block;
 pub mod c4;
 pub mod class;
+pub mod cynefin;
+pub mod eventmodeling;
+pub mod info;
+pub mod ishikawa;
+pub mod railroad;
+pub mod treeview;
+pub mod wardley;
 pub mod er;
 pub mod gantt;
 pub mod gitgraph;
@@ -37,8 +45,11 @@ pub mod packet;
 pub mod pie;
 pub mod quadrant;
 pub mod radar;
+pub mod rough;
 pub mod requirement;
 pub mod sankey;
+pub mod font;
+pub mod label;
 pub mod sequence;
 pub mod state;
 pub mod theme;
@@ -49,6 +60,24 @@ pub mod xychart;
 
 pub use model::*;
 pub use theme::MermaidTheme;
+
+/// Visual style for shapes — mermaid's `look` config.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Look {
+    /// Clean geometric shapes.
+    #[default]
+    Classic,
+    /// Hand-drawn / sketchy outlines (mermaid's `look: handDrawn`, roughjs).
+    HandDrawn,
+}
+pub use architecture::render_architecture;
+pub use cynefin::render_cynefin;
+pub use eventmodeling::render_eventmodeling;
+pub use info::render_info;
+pub use ishikawa::render_ishikawa;
+pub use railroad::render_railroad;
+pub use treeview::render_treeview;
+pub use wardley::render_wardley;
 pub use block::render_block;
 pub use c4::render_c4;
 pub use class::render_class;
@@ -98,6 +127,8 @@ pub struct MermaidOptions {
     /// Spacing between ranks / between nodes in a rank (dagre ranksep/nodesep), px.
     pub rank_sep: f32,
     pub node_sep: f32,
+    /// Shape look (classic vs hand-drawn).
+    pub look: Look,
 }
 
 impl Default for MermaidOptions {
@@ -115,6 +146,7 @@ impl Default for MermaidOptions {
             series_palette: Vec::new(),
             rank_sep: 50.0,
             node_sep: 50.0,
+            look: Look::Classic,
         };
         theme::apply(&mut o, MermaidTheme::Default);
         o
@@ -180,19 +212,39 @@ pub fn render_flowchart(src: &str, opts: &MermaidOptions) -> Result<MermaidRende
 /// → sequence diagram). Returns [`MermaidError::Parse`] for an unknown/missing
 /// header.
 pub fn render(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, MermaidError> {
-    // Honor `---` frontmatter and `%%{init}%%` theme directives, and strip them
-    // so the diagram parsers see a clean source.
-    let (clean, theme) = theme::preprocess(src);
+    // Honor `---` frontmatter and `%%{init}%%` config (theme / look / fontFamily
+    // / fontSize), and strip them so the diagram parsers see a clean source.
+    let (clean, cfg) = theme::preprocess(src);
     let owned;
-    let opts: &MermaidOptions = match theme {
-        Some(t) => {
-            owned = opts.clone().with_theme(t);
-            &owned
+    let opts: &MermaidOptions = if cfg.theme.is_some()
+        || cfg.look.is_some()
+        || cfg.font_family.is_some()
+        || cfg.font_size.is_some()
+    {
+        let mut o = opts.clone();
+        if let Some(t) = cfg.theme {
+            o = o.with_theme(t);
         }
-        None => opts,
+        if let Some(l) = cfg.look {
+            o.look = l;
+        }
+        if let Some(f) = cfg.font_family {
+            o.font_family = f;
+        }
+        if let Some(s) = cfg.font_size {
+            o.font_size_px = s;
+        }
+        owned = o;
+        &owned
+    } else {
+        opts
     };
     let mut rendered = dispatch(&clean, opts)?;
     inject_background(&mut rendered, opts.background);
+    // Hand-drawn look: rewrite the SVG's shapes into sketchy paths.
+    if opts.look == Look::HandDrawn {
+        rough::roughen(&mut rendered.svg);
+    }
     Ok(rendered)
 }
 
@@ -247,6 +299,15 @@ fn dispatch(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, MermaidEr
         Some("venn-beta") | Some("venn") => render_venn(src, opts),
         Some("C4Context") | Some("C4Container") | Some("C4Component") | Some("C4Dynamic")
         | Some("C4Deployment") => render_c4(src, opts),
+        Some("architecture-beta") | Some("architecture") => render_architecture(src, opts),
+        Some("cynefin-beta") | Some("cynefin") => render_cynefin(src, opts),
+        Some("eventmodeling") => render_eventmodeling(src, opts),
+        Some("info") => render_info(src, opts),
+        Some("ishikawa") | Some("fishbone") => render_ishikawa(src, opts),
+        Some("treeView-beta") | Some("treeView") | Some("treeview") => render_treeview(src, opts),
+        Some("wardley-beta") | Some("wardley") => render_wardley(src, opts),
+        Some("railroad-diagram") | Some("railroad-peg") | Some("railroad-ebnf")
+        | Some("railroad-abnf") | Some("railroad") => render_railroad(src, opts),
         Some(other) => Err(MermaidError::Parse(format!("unknown diagram type: {other:?}"))),
         None => Err(MermaidError::Parse("empty input / no diagram header".to_string())),
     }

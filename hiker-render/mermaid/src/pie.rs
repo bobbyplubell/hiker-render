@@ -175,9 +175,15 @@ const PALETTE: [[u8; 3]; 12] = [
     [0xA0, 0x80, 0x40], // brown
 ];
 
-/// The palette color for slice index `i` (cycling).
-fn palette(i: usize) -> [u8; 3] {
-    PALETTE[i % PALETTE.len()]
+/// The palette color (RGB) for slice index `i` (cycling). Prefers the active
+/// theme's `series_palette` when set, falling back to the local [`PALETTE`].
+fn palette_color(opts: &MermaidOptions, i: usize) -> [u8; 3] {
+    if !opts.series_palette.is_empty() {
+        let c = opts.series_palette[i % opts.series_palette.len()];
+        [c[0], c[1], c[2]]
+    } else {
+        PALETTE[i % PALETTE.len()]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +281,7 @@ pub fn render_pie(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Mer
         let (x0, y0) = (cx + radius * a0.cos(), cy + radius * a0.sin());
         let (x1, y1) = (cx + radius * a1.cos(), cy + radius * a1.sin());
         let large_arc = if sweep > std::f32::consts::PI { 1 } else { 0 };
-        let [r, g, b] = palette(i);
+        let [r, g, b] = palette_color(opts, i);
 
         let _ = write!(
             svg,
@@ -318,7 +324,7 @@ pub fn render_pie(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Mer
     let block_h = row_h * pie.slices.len() as f32;
     let mut ly = cy - block_h / 2.0;
     for (i, slice) in pie.slices.iter().enumerate() {
-        let [r, g, b] = palette(i);
+        let [r, g, b] = palette_color(opts, i);
         let _ = write!(
             svg,
             "<rect x=\"{x:.2}\" y=\"{ly:.2}\" width=\"{LEGEND_RECT}\" height=\"{LEGEND_RECT}\" \

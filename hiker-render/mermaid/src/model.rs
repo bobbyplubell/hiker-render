@@ -93,12 +93,27 @@ pub struct FlowEdge {
     pub style: ElemStyle,
 }
 
+/// A subgraph (cluster): a labeled boundary box grouping a set of nodes. Built
+/// from a `subgraph <id> [Title] … end` block. `node_ids` lists the flow nodes
+/// *directly* in this subgraph (a nested subgraph's members live in the nested
+/// subgraph, not here); `parent` is the index into [`FlowChart::subgraphs`] of
+/// the enclosing subgraph (for nesting), else `None`.
+#[derive(Clone, Debug)]
+pub struct Subgraph {
+    pub id: String,
+    pub title: String,
+    pub node_ids: Vec<String>,
+    pub parent: Option<usize>,
+}
+
 /// A parsed flowchart. `nodes` is in first-seen (insertion) order.
 #[derive(Clone, Debug, Default)]
 pub struct FlowChart {
     pub direction: Direction,
     pub nodes: Vec<FlowNode>,
     pub edges: Vec<FlowEdge>,
+    /// Subgraphs (clusters), in declaration order.
+    pub subgraphs: Vec<Subgraph>,
 }
 
 // ── Positioned (layout output) ──────────────────────────────────────────────
@@ -135,11 +150,26 @@ pub struct PositionedEdge {
     pub style: ElemStyle,
 }
 
+/// A laid-out subgraph cluster: a boundary box (top-left `x`/`y` + size) with a
+/// title drawn at its top-left.
+#[derive(Clone, Debug)]
+pub struct PositionedCluster {
+    pub title: String,
+    /// Top-left corner.
+    pub x: f32,
+    pub y: f32,
+    /// Box width/height.
+    pub w: f32,
+    pub h: f32,
+}
+
 /// The laid-out diagram in a 0-origin coordinate space of size `width`×`height`.
 #[derive(Clone, Debug, Default)]
 pub struct PositionedDiagram {
     pub nodes: Vec<PositionedNode>,
     pub edges: Vec<PositionedEdge>,
+    /// Subgraph boundary boxes, drawn behind nodes/edges.
+    pub clusters: Vec<PositionedCluster>,
     pub width: f32,
     pub height: f32,
 }

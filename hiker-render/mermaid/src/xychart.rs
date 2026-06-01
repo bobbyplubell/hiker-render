@@ -365,8 +365,14 @@ const PALETTE: [[u8; 4]; 8] = [
     [0x9E, 0x9E, 0x9E, 255], // gray
 ];
 
-fn palette(i: usize) -> [u8; 4] {
-    PALETTE[i % PALETTE.len()]
+/// The series color (RGBA) for index `i` (cycling). Prefers the active theme's
+/// `series_palette` when set, falling back to the local [`PALETTE`].
+fn palette_color(opts: &MermaidOptions, i: usize) -> [u8; 4] {
+    if !opts.series_palette.is_empty() {
+        opts.series_palette[i % opts.series_palette.len()]
+    } else {
+        PALETTE[i % PALETTE.len()]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -529,7 +535,7 @@ pub fn render_xychart(src: &str, opts: &MermaidOptions) -> Result<MermaidRender,
     let bar_w = group_w / n_bar as f32;
 
     for (bi, (si, s)) in bar_series.iter().enumerate() {
-        let color = palette(*si);
+        let color = palette_color(opts, *si);
         for (ci, &v) in s.values.iter().enumerate() {
             if ci >= n_cats {
                 break;
@@ -554,7 +560,7 @@ pub fn render_xychart(src: &str, opts: &MermaidOptions) -> Result<MermaidRender,
         if s.kind != SeriesKind::Line {
             continue;
         }
-        let color = palette(si);
+        let color = palette_color(opts, si);
         let mut pts = String::new();
         let mut dots: Vec<(f32, f32)> = Vec::new();
         for (ci, &v) in s.values.iter().enumerate() {

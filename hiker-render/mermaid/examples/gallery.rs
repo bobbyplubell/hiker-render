@@ -13,7 +13,17 @@
 //!   cargo build -p hiker-mermaid --example gallery
 
 use eframe::egui;
-use hiker_mermaid::{MermaidError, MermaidOptions, MermaidRender, render};
+use hiker_mermaid::{Look, MermaidError, MermaidOptions, MermaidRender, MermaidTheme, render};
+
+/// Display name for a theme.
+fn theme_name(t: MermaidTheme) -> &'static str {
+    match t {
+        MermaidTheme::Default => "Default",
+        MermaidTheme::Dark => "Dark",
+        MermaidTheme::Forest => "Forest",
+        MermaidTheme::Neutral => "Neutral",
+    }
+}
 
 /// A built-in example: display name, diagram-type group, and mermaid source.
 struct Example {
@@ -46,6 +56,14 @@ enum Group {
     Packet,
     Block,
     Venn,
+    Architecture,
+    Cynefin,
+    EventModeling,
+    Info,
+    Ishikawa,
+    Railroad,
+    TreeView,
+    Wardley,
 }
 
 impl Group {
@@ -73,6 +91,14 @@ impl Group {
             Group::Packet => "Packet",
             Group::Block => "Block",
             Group::Venn => "Venn",
+            Group::Architecture => "Architecture",
+            Group::Cynefin => "Cynefin",
+            Group::EventModeling => "Event Modeling",
+            Group::Info => "Info",
+            Group::Ishikawa => "Ishikawa",
+            Group::Railroad => "Railroad",
+            Group::TreeView => "Tree View",
+            Group::Wardley => "Wardley",
         }
     }
 }
@@ -86,6 +112,16 @@ fn examples() -> Vec<Example> {
             src: "graph TD; A[Start]-->B{OK?}; B-->|yes|C(Done); B-->|no|A",
         },
         Example {
+            name: "Styled (classDef)",
+            group: Group::Flowchart,
+            src: "graph TD\n    A[Start]:::hot --> B{Check}\n    B -->|ok| C[Process]:::cool\n    B -->|fail| D[Reject]\n    style D fill:#fdd,stroke:#c00,stroke-width:3px\n    classDef hot fill:#ffb3b3,stroke:#c00,stroke-width:3px\n    classDef cool fill:#b3d9ff,stroke:#06c,stroke-width:2px",
+        },
+        Example {
+            name: "Subgraphs",
+            group: Group::Flowchart,
+            src: "flowchart TD\n    subgraph one [Frontend]\n        A[UI] --> B[Router]\n    end\n    subgraph two [Backend]\n        C[API] --> D[Database]\n    end\n    B --> C",
+        },
+        Example {
             name: "Pets",
             group: Group::Pie,
             src: "pie showData title Pet ownership\n    \"Dogs\" : 386\n    \"Cats\" : 85\n    \"Rats\" : 15",
@@ -94,6 +130,11 @@ fn examples() -> Vec<Example> {
             name: "Greeting",
             group: Group::Sequence,
             src: "sequenceDiagram\n    participant A as Alice\n    participant B as Bob\n    A->>B: Hello Bob\n    B-->>A: Hi Alice\n    A->>B: How are you?\n    B->>B: thinking\n    B-->>A: Great!",
+        },
+        Example {
+            name: "Loops & alt",
+            group: Group::Sequence,
+            src: "sequenceDiagram\n    participant A as Alice\n    participant B as Bob\n    A->>+B: Request\n    Note over A,B: handshake\n    loop every minute\n        B-->>A: heartbeat\n    end\n    alt success\n        B->>A: data\n    else failure\n        B->>A: error\n    end\n    B-->>-A: done",
         },
         Example {
             name: "Lifecycle",
@@ -200,6 +241,46 @@ fn examples() -> Vec<Example> {
             group: Group::Venn,
             src: "venn\n    title Hobbies\n    set \"Music\": Alice, Bob, Carol\n    set \"Sports\": Bob, Carol, Dave\n    set \"Art\": Carol, Eve",
         },
+        Example {
+            name: "API",
+            group: Group::Architecture,
+            src: "architecture-beta\n    group api(cloud)[API]\n    service db(database)[Database] in api\n    service server(server)[Server] in api\n    db:L -- R:server",
+        },
+        Example {
+            name: "Cynefin",
+            group: Group::Cynefin,
+            src: "cynefin-beta\n    title Cynefin\n    complex\n        \"New product\"\n    complicated\n        \"Scaling up\"\n    clear\n        \"Run payroll\"\n    chaotic\n        \"Site outage\"",
+        },
+        Example {
+            name: "Order flow",
+            group: Group::EventModeling,
+            src: "eventmodeling\n    tf 1 ui Order.Form\n    tf 2 cmd Order.Place\n    tf 3 evt Order.Placed\n    tf 4 rmo Order.List",
+        },
+        Example {
+            name: "About",
+            group: Group::Info,
+            src: "info",
+        },
+        Example {
+            name: "Defects",
+            group: Group::Ishikawa,
+            src: "ishikawa\n    Defects\n        Machine\n            Wear\n        Method\n            Unclear steps\n        Material\n            Bad supplier",
+        },
+        Example {
+            name: "EBNF",
+            group: Group::Railroad,
+            src: "railroad-ebnf\n    expr = term { \"+\" term } ;\n    term = \"a\" | \"b\" | ( expr ) ;",
+        },
+        Example {
+            name: "Project files",
+            group: Group::TreeView,
+            src: "treeView-beta\n    src\n      main.rs\n      lib.rs\n    tests\n      smoke.rs",
+        },
+        Example {
+            name: "Tea Shop",
+            group: Group::Wardley,
+            src: "wardley-beta\n    title Tea Shop\n    component Customer [0.9, 0.5]\n    component Cup of Tea [0.7, 0.6]\n    component Kettle [0.3, 0.8]\n    Customer -> Cup of Tea\n    Cup of Tea -> Kettle",
+        },
     ]
 }
 
@@ -217,11 +298,13 @@ struct GalleryApp {
     selected: Option<usize>,
     /// Live editor contents — the source actually rendered.
     source: String,
-    /// Render options (renderer defaults; light theme).
-    opts: MermaidOptions,
+    /// Selected color theme.
+    theme: MermaidTheme,
+    /// Hand-drawn (sketchy) look.
+    hand_drawn: bool,
 
-    /// Last (source, scale) we rasterized for, so we only re-render on change.
-    last_key: Option<(String, u32)>,
+    /// Last (source, scale, theme) we rasterized for, so we only re-render on change.
+    last_key: Option<(String, u32, MermaidTheme, bool)>,
     /// Current render result, or the error message to show in red.
     current: Result<Rendered, String>,
 
@@ -242,7 +325,8 @@ impl Default for GalleryApp {
             examples,
             selected: Some(0),
             source,
-            opts: MermaidOptions::default(),
+            theme: MermaidTheme::Default,
+            hand_drawn: false,
             last_key: None,
             current: Err("not yet rendered".to_string()),
             zoom: 1.0,
@@ -260,12 +344,16 @@ impl GalleryApp {
         // re-rasterizing on every tiny zoom tick (we key on the integer scale).
         let scale = self.raster_scale.max(self.zoom).max(1.0);
         let scale_key = (scale * 100.0).round() as u32;
-        let key = (self.source.clone(), scale_key);
+        let key = (self.source.clone(), scale_key, self.theme, self.hand_drawn);
         if self.last_key.as_ref() == Some(&key) {
             return;
         }
         self.last_key = Some(key);
-        self.current = render_to_texture(ctx, &self.source, &self.opts, scale);
+        let mut opts = MermaidOptions::theme(self.theme);
+        if self.hand_drawn {
+            opts.look = Look::HandDrawn;
+        }
+        self.current = render_to_texture(ctx, &self.source, &opts, scale);
     }
 }
 
@@ -313,6 +401,21 @@ impl eframe::App for GalleryApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Mermaid source");
+                    ui.separator();
+                    ui.label("Theme");
+                    egui::ComboBox::from_id_salt("theme")
+                        .selected_text(theme_name(self.theme))
+                        .show_ui(ui, |ui| {
+                            for t in [
+                                MermaidTheme::Default,
+                                MermaidTheme::Dark,
+                                MermaidTheme::Forest,
+                                MermaidTheme::Neutral,
+                            ] {
+                                ui.selectable_value(&mut self.theme, t, theme_name(t));
+                            }
+                        });
+                    ui.checkbox(&mut self.hand_drawn, "Hand-drawn");
                     ui.separator();
                     ui.checkbox(&mut self.checkered, "Checkered bg");
                     ui.separator();
@@ -457,6 +560,9 @@ fn rasterize(svg: &str, w: f32, h: f32, scale: f32) -> Result<egui::ColorImage, 
     {
         let db = opt.fontdb_mut();
         db.load_system_fonts();
+        // Load the exact font the renderer measured with, so glyph
+        // widths match the laid-out boxes even without it installed.
+        db.load_font_data(hiker_mermaid::font::FONT_BYTES.to_vec());
         // fontdb maps the generic `sans-serif` to "Arial" by default, which is
         // absent on Linux, so `<text font-family="sans-serif">` would resolve to
         // nothing. Point the generics at fonts that are actually installed.

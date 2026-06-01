@@ -201,6 +201,16 @@ const PALETTE: [[u8; 4]; 8] = [
     [236, 255, 248, 255],
 ];
 
+/// Pick a palette color (RGBA) for a column index. Prefers the active theme's
+/// `series_palette` when set, falling back to the local [`PALETTE`].
+fn palette_color(opts: &MermaidOptions, i: usize) -> [u8; 4] {
+    if !opts.series_palette.is_empty() {
+        opts.series_palette[i % opts.series_palette.len()]
+    } else {
+        PALETTE[i % PALETTE.len()]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -253,7 +263,7 @@ pub fn render_kanban(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, 
 
     for (i, col) in board.columns.iter().enumerate() {
         let x = col_x(i);
-        let color = PALETTE[i % PALETTE.len()];
+        let color = palette_color(opts, i);
 
         // Header box.
         let _ = write!(

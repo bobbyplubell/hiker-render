@@ -1923,7 +1923,9 @@ dependencies = [
  "eframe",
  "egui",
  "hiker-graph",
+ "hiker-math",
  "resvg",
+ "ttf-parser",
 ]
 
 [[package]]

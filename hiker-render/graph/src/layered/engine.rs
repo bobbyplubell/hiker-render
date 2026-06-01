@@ -52,8 +52,20 @@ impl LayoutEngine for LayeredEngine {
                 positions: Vec::new(),
                 edge_routes: Vec::new(),
                 edge_label_positions: Vec::new(),
+                node_sizes: Vec::new(),
                 size: Vec2::ZERO,
             };
+        }
+
+        // A node is a *cluster* if some other node names it as parent — dagre
+        // sizes those from their children, so give them no fixed size.
+        let mut is_cluster = vec![false; n];
+        if let Some(parents) = input.node_parents {
+            for p in parents.iter().flatten() {
+                if *p < n {
+                    is_cluster[*p] = true;
+                }
+            }
         }
 
         // dagre's layout graph is a directed compound multigraph; layered
@@ -75,12 +87,17 @@ impl LayoutEngine for LayeredEngine {
 
         // Nodes get string ids "0".."{n-1}" so we can map back positionally.
         for i in 0..n {
-            let (w, h) = match input.node_sizes {
-                Some(sizes) if i < sizes.len() => (sizes[i].x as f64, sizes[i].y as f64),
-                _ => (
-                    self.default_node_size.x as f64,
-                    self.default_node_size.y as f64,
-                ),
+            let (w, h) = if is_cluster[i] {
+                // Cluster: dagre computes its size from its children.
+                (0.0, 0.0)
+            } else {
+                match input.node_sizes {
+                    Some(sizes) if i < sizes.len() => (sizes[i].x as f64, sizes[i].y as f64),
+                    _ => (
+                        self.default_node_size.x as f64,
+                        self.default_node_size.y as f64,
+                    ),
+                }
             };
             g.set_node(
                 i.to_string(),
@@ -90,6 +107,17 @@ impl LayoutEngine for LayeredEngine {
                     ..Default::default()
                 },
             );
+        }
+
+        // Cluster membership: node i is a child of its parent (compound graph).
+        if let Some(parents) = input.node_parents {
+            for (i, parent) in parents.iter().enumerate() {
+                if let Some(p) = parent {
+                    if *p < n && *p != i {
+                        g.set_parent(i.to_string(), p.to_string());
+                    }
+                }
+            }
         }
 
         // Each edge gets a unique `name` (its index) so duplicate and self
@@ -160,6 +188,15 @@ impl LayoutEngine for LayeredEngine {
             })
             .collect();
 
+        // Read back each node's final size: leaves echo their input size; cluster
+        // nodes carry the dagre-computed bounding rectangle.
+        let node_sizes: Vec<Vec2> = (0..n)
+            .map(|i| match g.node(&i.to_string()) {
+                Some(nl) => Vec2::new(nl.width as f32, nl.height as f32),
+                None => Vec2::ZERO,
+            })
+            .collect();
+
         let size = g
             .graph()
             .map(|gl| {
@@ -174,6 +211,7 @@ impl LayoutEngine for LayeredEngine {
             positions,
             edge_routes,
             edge_label_positions,
+            node_sizes,
             size,
         }
     }
@@ -203,6 +241,7 @@ mod tests {
             edges: &edges,
             node_sizes: None,
             edge_label_sizes: None,
+            node_parents: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);
@@ -225,6 +264,7 @@ mod tests {
             edges: &edges,
             node_sizes: None,
             edge_label_sizes: None,
+            node_parents: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);
@@ -244,6 +284,7 @@ mod tests {
             edges: &[],
             node_sizes: None,
             edge_label_sizes: None,
+            node_parents: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);
@@ -260,6 +301,7 @@ mod tests {
             edges: &edges,
             node_sizes: None,
             edge_label_sizes: None,
+            node_parents: None,
             directed: true,
         };
         let eng = LayeredEngine::default();
@@ -282,6 +324,7 @@ mod tests {
             edges: &edges,
             node_sizes: Some(&sizes),
             edge_label_sizes: None,
+            node_parents: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);
@@ -299,6 +342,7 @@ mod tests {
             edges: &edges,
             node_sizes: None,
             edge_label_sizes: None,
+            node_parents: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);

@@ -382,6 +382,17 @@ const PALETTE: [[u8; 3]; 8] = [
     [120, 144, 156], // blue grey
 ];
 
+/// The curve color (RGB) for index `i` (cycling). Prefers the active theme's
+/// `series_palette` when set, falling back to the local [`PALETTE`].
+fn palette_color(opts: &MermaidOptions, i: usize) -> [u8; 3] {
+    if !opts.series_palette.is_empty() {
+        let c = opts.series_palette[i % opts.series_palette.len()];
+        [c[0], c[1], c[2]]
+    } else {
+        PALETTE[i % PALETTE.len()]
+    }
+}
+
 /// Point on a spoke at axis index `k` (of `n`), at radius `r`, around `center`.
 fn spoke_point(center: (f32, f32), k: usize, n: usize, r: f32) -> (f32, f32) {
     let angle = -std::f32::consts::FRAC_PI_2 + (k as f32) * 2.0 * std::f32::consts::PI / (n as f32);
@@ -533,7 +544,7 @@ pub fn render_radar(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
 
     // Curves.
     for (ci, curve) in radar.curves.iter().enumerate() {
-        let color = PALETTE[ci % PALETTE.len()];
+        let color = palette_color(opts, ci);
         let stroke = rgb([color[0], color[1], color[2], 255]);
         let fill_rgba = [color[0], color[1], color[2], 64u8];
         let mut pts = String::new();
@@ -567,7 +578,7 @@ pub fn render_radar(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
         let mut ly = title_h + fs;
         let sw = fs * 0.9;
         for (ci, curve) in radar.curves.iter().enumerate() {
-            let color = PALETTE[ci % PALETTE.len()];
+            let color = palette_color(opts, ci);
             let stroke = rgb([color[0], color[1], color[2], 255]);
             let _ = write!(
                 s,

@@ -24,8 +24,272 @@ use std::fmt::Write as _;
 use hiker_graph::layered::RankDir;
 use hiker_graph::{GraphInput, LayeredEngine, LayoutEngine, Vec2};
 
+use crate::model::ElemStyle;
 use crate::svgutil::{edge_label_anchor, escape, opacity_attr, rgb, text_size};
 use crate::{MermaidError, MermaidOptions, MermaidRender};
+
+// ── Styling directives (classDef / class / style / :::) ───────────────────────
+//
+// Self-contained re-implementation of the flowchart styling parser (`parse.rs`),
+// mirroring its syntax/semantics: same prop names, same color formats, same
+// two-pass resolve (classDef-via-`class` first, inline `style` on top).
+
+/// Directive state collected during parsing, resolved onto entities at the end.
+#[derive(Default)]
+struct Directives {
+    class_defs: HashMap<String, ElemStyle>,
+    /// `(entity name, class name)` from `class A,B name` and `A:::name`.
+    class_assignments: Vec<(String, String)>,
+    /// Inline `style <id> ...` overrides.
+    inline: Vec<(String, ElemStyle)>,
+}
+
+impl Directives {
+    /// Try to parse `line` as a styling directive; `true` if recognized.
+    fn try_parse(&mut self, line: &str) -> bool {
+        let mut words = line.split_whitespace();
+        let kw = match words.next() {
+            Some(k) => k,
+            None => return false,
+        };
+        match kw {
+            "classDef" => {
+                let rest = line[kw.len()..].trim_start();
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                if let Some(name) = parts.next().filter(|n| !n.is_empty()) {
+                    let props = parts.next().unwrap_or("");
+                    self.class_defs
+                        .insert(name.to_string(), parse_style_props(props));
+                }
+                true
+            }
+            "class" => {
+                // class <id1>,<id2>,... <className>  (applies to entity names)
+                let rest = line[kw.len()..].trim_start();
+                if let Some(sp) = rest.rfind(char::is_whitespace) {
+                    let ids = rest[..sp].trim();
+                    let class_name = rest[sp..].trim();
+                    if !class_name.is_empty() {
+                        for id in ids.split(',') {
+                            let id = id.trim();
+                            if !id.is_empty() {
+                                self.class_assignments
+                                    .push((id.to_string(), class_name.to_string()));
+                            }
+                        }
+                    }
+                }
+                true
+            }
+            "style" => {
+                let rest = line[kw.len()..].trim_start();
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                if let Some(id) = parts.next().filter(|n| !n.is_empty()) {
+                    let props = parts.next().unwrap_or("");
+                    self.inline.push((id.to_string(), parse_style_props(props)));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn add_shorthand(&mut self, id: &str, class_name: &str) {
+        if !id.is_empty() && !class_name.is_empty() {
+            self.class_assignments
+                .push((id.to_string(), class_name.to_string()));
+        }
+    }
+
+    /// Resolve onto each entity's `style`: classDef-via-`class` first, then inline.
+    fn resolve(&self, entities: &mut [Entity]) {
+        for (id, class_name) in &self.class_assignments {
+            if let Some(cs) = self.class_defs.get(class_name) {
+                if let Some(e) = entities.iter_mut().find(|e| e.name == *id) {
+                    merge_style(&mut e.style, cs);
+                }
+            }
+        }
+        for (id, st) in &self.inline {
+            if let Some(e) = entities.iter_mut().find(|e| e.name == *id) {
+                merge_style(&mut e.style, st);
+            }
+        }
+    }
+}
+
+fn merge_style(dst: &mut ElemStyle, src: &ElemStyle) {
+    if src.fill.is_some() {
+        dst.fill = src.fill;
+    }
+    if src.stroke.is_some() {
+        dst.stroke = src.stroke;
+    }
+    if src.stroke_width.is_some() {
+        dst.stroke_width = src.stroke_width;
+    }
+    if src.text_color.is_some() {
+        dst.text_color = src.text_color;
+    }
+    if src.dashed {
+        dst.dashed = true;
+    }
+}
+
+fn parse_style_props(props: &str) -> ElemStyle {
+    let mut style = ElemStyle::default();
+    for part in props.split(',') {
+        let (key, val) = match part.split_once(':') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+        match key {
+            "fill" => style.fill = parse_color(val).or(style.fill),
+            "stroke" => style.stroke = parse_color(val).or(style.stroke),
+            "color" => style.text_color = parse_color(val).or(style.text_color),
+            "stroke-width" => {
+                if let Ok(w) = val.trim_end_matches("px").trim().parse::<f32>() {
+                    style.stroke_width = Some(w);
+                }
+            }
+            "stroke-dasharray" => {
+                if !val.is_empty() {
+                    style.dashed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    style
+}
+
+fn parse_color(s: &str) -> Option<[u8; 4]> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        return parse_hex_color(hex);
+    }
+    if let Some(inner) = s.strip_prefix("rgba(").and_then(|x| x.strip_suffix(')')) {
+        return parse_rgb_func(inner, true);
+    }
+    if let Some(inner) = s.strip_prefix("rgb(").and_then(|x| x.strip_suffix(')')) {
+        return parse_rgb_func(inner, false);
+    }
+    parse_named_color(s)
+}
+
+fn parse_hex_color(h: &str) -> Option<[u8; 4]> {
+    let h = h.trim();
+    match h.len() {
+        3 => {
+            let r = u8::from_str_radix(&h[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&h[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&h[2..3], 16).ok()?;
+            Some([r * 17, g * 17, b * 17, 255])
+        }
+        6 => Some([
+            u8::from_str_radix(&h[0..2], 16).ok()?,
+            u8::from_str_radix(&h[2..4], 16).ok()?,
+            u8::from_str_radix(&h[4..6], 16).ok()?,
+            255,
+        ]),
+        8 => Some([
+            u8::from_str_radix(&h[0..2], 16).ok()?,
+            u8::from_str_radix(&h[2..4], 16).ok()?,
+            u8::from_str_radix(&h[4..6], 16).ok()?,
+            u8::from_str_radix(&h[6..8], 16).ok()?,
+        ]),
+        _ => None,
+    }
+}
+
+fn parse_rgb_func(inner: &str, with_alpha: bool) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+    if parts.len() != if with_alpha { 4 } else { 3 } {
+        return None;
+    }
+    let r = parts[0].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let g = parts[1].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let b = parts[2].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let a = if with_alpha {
+        let av = parts[3].parse::<f32>().ok()?;
+        if av <= 1.0 {
+            (av * 255.0).round().clamp(0.0, 255.0) as u8
+        } else {
+            av.round().clamp(0.0, 255.0) as u8
+        }
+    } else {
+        255
+    };
+    Some([r, g, b, a])
+}
+
+fn parse_named_color(name: &str) -> Option<[u8; 4]> {
+    let c = match name.to_ascii_lowercase().as_str() {
+        "red" => [255, 0, 0],
+        "green" => [0, 128, 0],
+        "blue" => [0, 0, 255],
+        "black" => [0, 0, 0],
+        "white" => [255, 255, 255],
+        "yellow" => [255, 255, 0],
+        "orange" => [255, 165, 0],
+        "purple" => [128, 0, 128],
+        "gray" | "grey" => [128, 128, 128],
+        "lightblue" => [173, 216, 230],
+        "lightgreen" => [144, 238, 144],
+        "pink" => [255, 192, 203],
+        "cyan" => [0, 255, 255],
+        "magenta" => [255, 0, 255],
+        "brown" => [165, 42, 42],
+        "lightgray" | "lightgrey" => [211, 211, 211],
+        _ => return None,
+    };
+    Some([c[0], c[1], c[2], 255])
+}
+
+/// Split a `name:::className` token into `(name, className)`; the className runs
+/// to the next whitespace. `None` when there is no `:::` shorthand.
+fn split_css_class(tok: &str) -> Option<(String, String)> {
+    let (name, after) = tok.split_once(":::")?;
+    let after = after.trim_start();
+    let css = match after.find(char::is_whitespace) {
+        Some(i) => &after[..i],
+        None => after,
+    };
+    if css.is_empty() {
+        None
+    } else {
+        Some((name.trim().to_string(), css.to_string()))
+    }
+}
+
+/// Remove every `<id>:::<className>` shorthand from `line`, recording each
+/// `(id, className)` assignment. The `id` is the run of id-chars immediately
+/// preceding `:::`; the `className` runs to the next non-id char. Returns the
+/// line with the `:::className` portions deleted (the id left in place).
+fn strip_inline_classes(line: &str, dir: &mut Directives) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(pos) = rest.find(":::") {
+        let before = &rest[..pos];
+        let id_start = before
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let id = before[id_start..].trim();
+        let after = &rest[pos + 3..];
+        let name_len = after
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(after.len());
+        let class_name = &after[..name_len];
+        if !id.is_empty() && !class_name.is_empty() {
+            dir.add_shorthand(id, class_name);
+        }
+        out.push_str(before);
+        rest = &after[name_len..];
+    }
+    out.push_str(rest);
+    out
+}
 
 /// One cardinality end of a relationship.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,19 +317,38 @@ impl Cardinality {
     }
 }
 
-/// An attribute row inside an entity box: `type name [keys...]`.
+/// An attribute row inside an entity box: `<type> <name> [<keys>] ["<comment>"]`.
+/// `keys` holds the recognized `PK`/`FK`/`UK` markers in source order; `comment`
+/// is the optional quoted trailing text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Attribute {
     ty: String,
     name: String,
-    keys: String,
+    /// Recognized key markers (`PK`/`FK`/`UK`), in source order.
+    keys: Vec<String>,
+    /// Optional quoted comment.
+    comment: Option<String>,
+}
+
+impl Attribute {
+    /// Whether this attribute is (part of) a primary key — rendered emphasized.
+    fn is_pk(&self) -> bool {
+        self.keys.iter().any(|k| k == "PK")
+    }
+
+    /// The keys joined for display, e.g. `PK,FK`. Empty when no keys.
+    fn keys_text(&self) -> String {
+        self.keys.join(",")
+    }
 }
 
 /// An entity (table). `attrs` empty → name-only box.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Entity {
     name: String,
     attrs: Vec<Attribute>,
+    /// Per-entity style overrides (from `classDef`/`class`/`style`/`:::`).
+    style: ElemStyle,
 }
 
 /// A relationship between two entities.
@@ -81,7 +364,7 @@ struct Relationship {
 }
 
 /// Parsed ER diagram.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct ErDiagram {
     /// Entities in first-seen order.
     entities: Vec<Entity>,
@@ -91,6 +374,7 @@ struct ErDiagram {
 /// Parse an ER diagram source. Errors on a missing/wrong header.
 fn parse(src: &str) -> Result<ErDiagram, String> {
     let mut diag = ErDiagram::default();
+    let mut directives = Directives::default();
     let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut saw_header = false;
     let mut pending_header = true;
@@ -124,29 +408,50 @@ fn parse(src: &str) -> Result<ErDiagram, String> {
             continue;
         }
 
-        // Entity attribute-block open: `ENTITY {`.
+        // Styling directives (`classDef`/`class`/`style`).
+        if line.starts_with("classDef")
+            || line.starts_with("class ")
+            || line.starts_with("style ")
+        {
+            directives.try_parse(line);
+            continue;
+        }
+
+        // Entity attribute-block open: `ENTITY {`. An entity name may carry a
+        // `:::class` shorthand (`CUSTOMER:::big {`).
         if let Some(name) = line.strip_suffix('{') {
             let name = name.trim();
             if !name.is_empty() {
-                let ei = ensure_entity(name, &mut diag, &mut index_of);
+                let (name, css) = peel_css(name);
+                let ei = ensure_entity(&name, &mut diag, &mut index_of);
+                if let Some(css) = css {
+                    directives.add_shorthand(&name, &css);
+                }
                 in_block = Some(ei);
                 continue;
             }
         }
 
-        // Relationship line.
-        if let Some(rel) = parse_relationship(line) {
+        // Relationship line. Either endpoint may carry a `:::class` shorthand
+        // (which contains `:` and would confuse the `: label` split), so peel
+        // those out of the line first.
+        let stripped = strip_inline_classes(line, &mut directives);
+        if let Some(rel) = parse_relationship(&stripped) {
             ensure_entity(&rel.left, &mut diag, &mut index_of);
             ensure_entity(&rel.right, &mut diag, &mut index_of);
             diag.relationships.push(rel);
             continue;
         }
 
-        // Bare entity declaration: a single token.
+        // Bare entity declaration: a single token (optionally with `:::class`).
         let mut toks = line.split_whitespace();
         if let Some(name) = toks.next() {
             if toks.next().is_none() {
-                ensure_entity(name, &mut diag, &mut index_of);
+                let (name, css) = peel_css(name);
+                ensure_entity(&name, &mut diag, &mut index_of);
+                if let Some(css) = css {
+                    directives.add_shorthand(&name, &css);
+                }
             }
         }
     }
@@ -154,7 +459,17 @@ fn parse(src: &str) -> Result<ErDiagram, String> {
     if !saw_header {
         return Err("empty input / no erDiagram header".to_string());
     }
+    directives.resolve(&mut diag.entities);
     Ok(diag)
+}
+
+/// Peel a trailing `:::className` off an entity token, returning the bare name
+/// and the class (if any).
+fn peel_css(tok: &str) -> (String, Option<String>) {
+    match split_css_class(tok) {
+        Some((base, css)) => (base, Some(css)),
+        None => (tok.trim().to_string(), None),
+    }
 }
 
 /// Upsert an entity by name, returning its index.
@@ -171,17 +486,59 @@ fn ensure_entity(
     diag.entities.push(Entity {
         name: name.to_string(),
         attrs: Vec::new(),
+        style: ElemStyle::default(),
     });
     i
 }
 
-/// Parse `type name [keys...]` → an [`Attribute`]. `None` if it has no name.
+/// Parse `<type> <name> [<keys>] ["<comment>"]` → an [`Attribute`].
+/// `None` if it has no name. Keys are one or more of `PK`/`FK`/`UK`, comma or
+/// whitespace separated; the comment is the optional quoted trailing text.
 fn parse_attribute(line: &str) -> Option<Attribute> {
-    let mut toks = line.split_whitespace();
+    // Peel off a trailing quoted comment first, so commas/keywords inside it
+    // are never mistaken for keys.
+    let (head, comment) = split_trailing_quoted(line);
+
+    let mut toks = head.split_whitespace();
     let ty = toks.next()?.to_string();
     let name = toks.next()?.to_string();
-    let keys = toks.collect::<Vec<_>>().join(" ");
-    Some(Attribute { ty, name, keys })
+
+    // Remaining tokens are keys; accept comma- or space-separated PK/FK/UK and
+    // ignore anything unrecognized.
+    let mut keys = Vec::new();
+    for tok in toks {
+        for part in tok.split(',') {
+            let part = part.trim();
+            if matches!(part, "PK" | "FK" | "UK") {
+                keys.push(part.to_string());
+            }
+        }
+    }
+
+    Some(Attribute {
+        ty,
+        name,
+        keys,
+        comment,
+    })
+}
+
+/// Split a trailing `"..."` quoted comment off `line`, returning
+/// `(head_without_comment, Some(comment))` when a closing-quoted segment ends
+/// the line, else `(line, None)`.
+fn split_trailing_quoted(line: &str) -> (&str, Option<String>) {
+    let trimmed = line.trim_end();
+    if !trimmed.ends_with('"') {
+        return (line, None);
+    }
+    // Find the opening quote for this trailing closing quote.
+    let body = &trimmed[..trimmed.len() - 1];
+    if let Some(open) = body.rfind('"') {
+        let comment = body[open + 1..].to_string();
+        (&trimmed[..open], Some(comment))
+    } else {
+        (line, None)
+    }
 }
 
 /// Parse a relationship line `LEFT <card>--<card> RIGHT [: label]`. Returns
@@ -267,20 +624,18 @@ pub fn render_er(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
         .map(|(i, e)| (e.name.as_str(), i as u32))
         .collect();
 
-    // Size each entity box: width = widest of (name, attr rows) + padding;
-    // height = header + attr rows.
+    // Size each entity box. Attribute rows are laid out as up to 4 columns —
+    // `type | name | keys | comment` — each sized to its widest cell across all
+    // rows. The box width is the larger of the name header and the summed
+    // columns (+ padding); height = header + attr rows.
     let sizes: Vec<(f32, f32)> = diag
         .entities
         .iter()
         .map(|e| {
             let (name_w, name_h) = text_size(&e.name, fs);
-            let mut max_w = name_w;
-            for a in &e.attrs {
-                let row = attr_row_text(a);
-                let (w, _) = text_size(&row, fs);
-                max_w = max_w.max(w);
-            }
-            let w = max_w + 2.0 * opts.node_padding_x;
+            let cols = attr_columns(e, fs);
+            let rows_w = cols.iter().sum::<f32>();
+            let w = name_w.max(rows_w) + 2.0 * opts.node_padding_x;
             let header_h = name_h + 2.0 * HEADER_PAD_Y;
             let h = header_h + e.attrs.len() as f32 * row_h;
             (w, h)
@@ -318,6 +673,7 @@ pub fn render_er(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
         edges: &edges,
         node_sizes: Some(&node_sizes),
         edge_label_sizes: Some(&label_sizes),
+        node_parents: None,
         directed: true,
     });
 
@@ -378,13 +734,33 @@ pub fn render_er(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
     })
 }
 
-/// Text of one attribute row (`type name keys`).
-fn attr_row_text(a: &Attribute) -> String {
-    if a.keys.is_empty() {
-        format!("{} {}", a.ty, a.name)
-    } else {
-        format!("{} {} {}", a.ty, a.name, a.keys)
+/// Inter-cell gap between attribute columns, px.
+const CELL_GAP: f32 = 12.0;
+
+/// Compute the four attribute-column widths for an entity:
+/// `[type, name, keys, comment]`. Each is the widest cell in that column across
+/// all rows; empty columns (e.g. no keys/comments anywhere) collapse to 0. A
+/// non-empty column carries a trailing `CELL_GAP` so columns don't touch.
+fn attr_columns(e: &Entity, fs: f32) -> [f32; 4] {
+    let mut cols = [0.0_f32; 4];
+    for a in &e.attrs {
+        cols[0] = cols[0].max(text_size(&a.ty, fs).0);
+        cols[1] = cols[1].max(text_size(&a.name, fs).0);
+        let kt = a.keys_text();
+        if !kt.is_empty() {
+            cols[2] = cols[2].max(text_size(&kt, fs).0);
+        }
+        if let Some(c) = a.comment.as_deref() {
+            cols[3] = cols[3].max(text_size(c, fs).0);
+        }
     }
+    // Add a trailing gap to every non-empty column except the last present one.
+    for w in cols.iter_mut() {
+        if *w > 0.0 {
+            *w += CELL_GAP;
+        }
+    }
+    cols
 }
 
 /// One relationship: a line (dashed for non-identifying), a crow's-foot
@@ -578,19 +954,25 @@ fn emit_entity(
     let y = cy - h / 2.0;
     let header_h = opts.font_size_px * 1.2 + 2.0 * HEADER_PAD_Y;
 
+    // Per-entity style overrides, falling back to theme defaults.
+    let fill_c = e.style.fill.unwrap_or(opts.node_fill);
+    let stroke_c = e.style.stroke.unwrap_or(opts.node_stroke);
+    let text_c = e.style.text_color.unwrap_or(opts.text_color);
+    let sw = e.style.stroke_width.unwrap_or(1.5);
+
     // Outer box.
     let _ = write!(
         svg,
         "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" \
-         fill=\"{fill}\"{fo} stroke=\"{stroke}\"{so} stroke-width=\"1.5\"/>",
-        fill = rgb(opts.node_fill),
-        fo = opacity_attr("fill-opacity", opts.node_fill),
-        stroke = rgb(opts.node_stroke),
-        so = opacity_attr("stroke-opacity", opts.node_stroke),
+         fill=\"{fill}\"{fo} stroke=\"{stroke}\"{so} stroke-width=\"{sw}\"/>",
+        fill = rgb(fill_c),
+        fo = opacity_attr("fill-opacity", fill_c),
+        stroke = rgb(stroke_c),
+        so = opacity_attr("stroke-opacity", stroke_c),
     );
 
     // Header name centered in the header band.
-    emit_text(svg, &e.name, cx, y + header_h / 2.0, opts, opts.text_color);
+    emit_text(svg, &e.name, cx, y + header_h / 2.0, opts, text_c);
 
     if e.attrs.is_empty() {
         return;
@@ -603,27 +985,79 @@ fn emit_entity(
          stroke=\"{stroke}\"{so} stroke-width=\"1\"/>",
         hy = y + header_h,
         x2 = x + w,
-        stroke = rgb(opts.node_stroke),
-        so = opacity_attr("stroke-opacity", opts.node_stroke),
+        stroke = rgb(stroke_c),
+        so = opacity_attr("stroke-opacity", stroke_c),
     );
 
     let row_h = opts.font_size_px * ROW_H_EM;
+    let fs = opts.font_size_px;
+    let cols = attr_columns(e, fs);
+    // A lighter color for comment text (blend text toward fill/background).
+    let comment_c = lighten(text_c);
     for (i, a) in e.attrs.iter().enumerate() {
         let row_cy = y + header_h + row_h * (i as f32 + 0.5);
-        // Left-aligned attribute text.
-        let tx = x + opts.node_padding_x;
-        let _ = write!(
-            svg,
-            "<text x=\"{tx:.2}\" y=\"{row_cy:.2}\" text-anchor=\"start\" \
-             dominant-baseline=\"central\" font-family=\"{family}\" font-size=\"{fs}\" \
-             fill=\"{fill}\"{fo}>{txt}</text>",
-            family = escape(&opts.font_family),
-            fs = opts.font_size_px,
-            fill = rgb(opts.text_color),
-            fo = opacity_attr("fill-opacity", opts.text_color),
-            txt = escape(&attr_row_text(a)),
-        );
+        // Walk the four columns left-to-right from the inner-left padding.
+        let mut tx = x + opts.node_padding_x;
+        // type
+        emit_cell(svg, &a.ty, tx, row_cy, opts, text_c, a.is_pk());
+        tx += cols[0];
+        // name
+        emit_cell(svg, &a.name, tx, row_cy, opts, text_c, a.is_pk());
+        tx += cols[1];
+        // keys (PK/FK/UK) — emphasized like the rest of a PK row.
+        if cols[2] > 0.0 {
+            let kt = a.keys_text();
+            if !kt.is_empty() {
+                emit_cell(svg, &kt, tx, row_cy, opts, text_c, true);
+            }
+            tx += cols[2];
+        }
+        // comment — lighter color.
+        if cols[3] > 0.0 {
+            if let Some(c) = a.comment.as_deref() {
+                emit_cell(svg, c, tx, row_cy, opts, comment_c, false);
+            }
+        }
     }
+}
+
+/// One left-aligned attribute cell at baseline-centered `(tx, cy)`. `bold`
+/// renders bolder text (used for PK rows and the key markers).
+fn emit_cell(
+    svg: &mut String,
+    text: &str,
+    tx: f32,
+    cy: f32,
+    opts: &MermaidOptions,
+    color: [u8; 4],
+    bold: bool,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let weight = if bold {
+        " font-weight=\"bold\""
+    } else {
+        ""
+    };
+    let _ = write!(
+        svg,
+        "<text x=\"{tx:.2}\" y=\"{cy:.2}\" text-anchor=\"start\" \
+         dominant-baseline=\"central\" font-family=\"{family}\" font-size=\"{fs}\"{weight} \
+         fill=\"{fill}\"{fo}>{txt}</text>",
+        family = escape(&opts.font_family),
+        fs = opts.font_size_px,
+        fill = rgb(color),
+        fo = opacity_attr("fill-opacity", color),
+        txt = escape(text),
+    );
+}
+
+/// A lighter variant of `c` for de-emphasized comment text (move RGB halfway
+/// toward mid-gray, keep alpha).
+fn lighten(c: [u8; 4]) -> [u8; 4] {
+    let mix = |v: u8| ((v as u16 + 128) / 2) as u8;
+    [mix(c[0]), mix(c[1]), mix(c[2]), c[3]]
 }
 
 /// A centered single-line `<text>` in the given color.
@@ -699,10 +1133,41 @@ mod tests {
         assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0].ty, "string");
         assert_eq!(attrs[0].name, "name");
-        assert_eq!(attrs[0].keys, "PK");
+        assert_eq!(attrs[0].keys, vec!["PK"]);
+        assert_eq!(attrs[0].comment, None);
         assert_eq!(attrs[1].ty, "int");
         assert_eq!(attrs[1].name, "age");
-        assert_eq!(attrs[1].keys, "");
+        assert!(attrs[1].keys.is_empty());
+        assert_eq!(attrs[1].comment, None);
+    }
+
+    #[test]
+    fn parse_attribute_keys_and_comment() {
+        // From the task: `CUSTOMER { string name PK "the name" int age }`.
+        let src = "erDiagram\n  CUSTOMER {\n    string name PK \"the name\"\n    int age\n  }";
+        let d = parse(src).unwrap();
+        let attrs = &d.entities[0].attrs;
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].name, "name");
+        assert_eq!(attrs[0].keys, vec!["PK"]);
+        assert_eq!(attrs[0].comment.as_deref(), Some("the name"));
+        assert!(attrs[0].is_pk());
+        // `age` has no key and no comment.
+        assert_eq!(attrs[1].name, "age");
+        assert!(attrs[1].keys.is_empty());
+        assert_eq!(attrs[1].comment, None);
+        assert!(!attrs[1].is_pk());
+    }
+
+    #[test]
+    fn parse_multiple_keys_comma_and_space() {
+        let src = "erDiagram\n  T {\n    int a PK,FK \"c1\"\n    int b PK UK\n  }";
+        let d = parse(src).unwrap();
+        let attrs = &d.entities[0].attrs;
+        assert_eq!(attrs[0].keys, vec!["PK", "FK"]);
+        assert_eq!(attrs[0].comment.as_deref(), Some("c1"));
+        assert_eq!(attrs[1].keys, vec!["PK", "UK"]);
+        assert_eq!(attrs[1].comment, None);
     }
 
     #[test]
@@ -757,10 +1222,50 @@ mod tests {
     fn attribute_rows_rendered() {
         let src = "erDiagram\n  CUSTOMER {\n    string name PK\n  }\n  CUSTOMER ||--o{ ORDER : x";
         let r = render_er(src, &opts()).unwrap();
-        // Attribute row text appears.
-        assert!(r.svg.contains("string name PK"));
+        // Attribute cells appear (type, name, key each in their own <text>).
+        assert!(r.svg.contains(">string<"));
+        assert!(r.svg.contains(">name<"));
+        assert!(r.svg.contains(">PK<"));
         // Separator <line> under the header.
         assert!(r.svg.contains("<line"));
+    }
+
+    #[test]
+    fn keys_and_comment_rendered() {
+        let src = "erDiagram\n  CUSTOMER {\n    string name PK \"the name\"\n    int age\n  }";
+        let r = render_er(src, &opts()).unwrap();
+        // Key marker and comment text both present as their own cells.
+        assert!(r.svg.contains(">PK<"), "PK key rendered: {}", r.svg);
+        assert!(r.svg.contains(">the name<"), "comment rendered: {}", r.svg);
+        // PK row is emphasized (bold) somewhere.
+        assert!(r.svg.contains("font-weight=\"bold\""));
+    }
+
+    #[test]
+    fn box_grows_to_fit_keys_and_comments() {
+        // Same entity with vs. without keys/comment → the keyed box is wider.
+        let bare = render_er("erDiagram\n  C {\n    string name\n  }", &opts()).unwrap();
+        let keyed = render_er(
+            "erDiagram\n  C {\n    string name PK \"a long-ish comment\"\n  }",
+            &opts(),
+        )
+        .unwrap();
+        assert!(
+            keyed.width_px > bare.width_px,
+            "keyed/comment box ({}) should be wider than bare ({})",
+            keyed.width_px,
+            bare.width_px,
+        );
+    }
+
+    #[test]
+    fn name_only_entity_has_no_attr_cells() {
+        // An attribute-less entity renders unchanged: no separator line, no cells.
+        let src = "erDiagram\n  LONE";
+        let r = render_er(src, &opts()).unwrap();
+        assert!(r.svg.contains(">LONE<"));
+        assert!(!r.svg.contains("<line"), "no attr separator for name-only box");
+        assert!(!r.svg.contains("font-weight=\"bold\""));
     }
 
     #[test]
@@ -814,5 +1319,54 @@ mod tests {
         let a = render_er(src, &opts()).unwrap();
         let b = render_er(src, &opts()).unwrap();
         assert_eq!(a, b);
+    }
+
+    // ---- styling directives ----
+
+    fn style_of<'a>(d: &'a ErDiagram, name: &str) -> &'a ElemStyle {
+        &d.entities.iter().find(|e| e.name == name).expect("entity").style
+    }
+
+    #[test]
+    fn classdef_and_class_apply() {
+        let src = "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  classDef big fill:#00f\n  class CUSTOMER big";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "CUSTOMER").fill, Some([0, 0, 255, 255]));
+        // ORDER untouched.
+        assert_eq!(style_of(&d, "ORDER").fill, None);
+    }
+
+    #[test]
+    fn triple_colon_shorthand() {
+        let src = "erDiagram\n  CUSTOMER:::big ||--o{ ORDER : places\n  classDef big fill:#00f";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "CUSTOMER").fill, Some([0, 0, 255, 255]));
+        // Relationship recorded with bare names.
+        assert_eq!(d.relationships[0].left, "CUSTOMER");
+        assert_eq!(d.relationships[0].right, "ORDER");
+        assert_eq!(d.relationships[0].label.as_deref(), Some("places"));
+    }
+
+    #[test]
+    fn style_directive_overrides_class() {
+        let src = "erDiagram\n  A ||--o{ B\n  classDef big fill:#00f\n  class A big\n  style A fill:#0f0";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "A").fill, Some([0, 255, 0, 255]));
+    }
+
+    #[test]
+    fn style_override_in_rendered_svg() {
+        let src = "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n  classDef big fill:#00f\n  class CUSTOMER big";
+        let r = render_er(src, &opts()).unwrap();
+        assert!(r.svg.contains(&rgb([0, 0, 255, 255])), "override fill present: {}", r.svg);
+    }
+
+    #[test]
+    fn unstyled_entities_unchanged() {
+        let src = "erDiagram\n  CUSTOMER ||--o{ ORDER : places";
+        let d = parse(src).unwrap();
+        for e in &d.entities {
+            assert_eq!(e.style, ElemStyle::default());
+        }
     }
 }

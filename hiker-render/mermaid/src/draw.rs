@@ -10,7 +10,9 @@
 use std::fmt::Write as _;
 
 use crate::MermaidOptions;
-use crate::model::{EdgeKind, NodeShape, PositionedDiagram, PositionedEdge, PositionedNode};
+use crate::model::{
+    EdgeKind, NodeShape, PositionedCluster, PositionedDiagram, PositionedEdge, PositionedNode,
+};
 
 /// Node/edge stroke width, px.
 const STROKE_W: f32 = 1.5;
@@ -42,6 +44,14 @@ pub fn draw_svg(diagram: &PositionedDiagram, opts: &MermaidOptions) -> String {
     );
 
     emit_defs(&mut svg, opts);
+
+    // Subgraph boundary boxes go first so edges + nodes paint over them. Draw the
+    // largest (outermost) clusters first so nested boxes layer on top.
+    let mut clusters: Vec<&PositionedCluster> = diagram.clusters.iter().collect();
+    clusters.sort_by(|a, b| (b.w * b.h).total_cmp(&(a.w * a.h)));
+    for cluster in clusters {
+        emit_cluster(&mut svg, cluster, opts);
+    }
 
     // Edges first so node fills paint on top of the line ends.
     for edge in &diagram.edges {
@@ -83,6 +93,44 @@ fn emit_defs(svg: &mut String, opts: &MermaidOptions) {
     );
 }
 
+/// One subgraph cluster: a rounded, dashed boundary box with a faint themed
+/// fill, plus its title at the top-left inside the box. Drawn behind the
+/// nodes/edges so they layer on top.
+fn emit_cluster(svg: &mut String, cluster: &PositionedCluster, opts: &MermaidOptions) {
+    let PositionedCluster { x, y, w, h, .. } = *cluster;
+    // Faint tint of the node fill so the box reads as a grouping without
+    // overpowering the nodes inside it.
+    let mut fill = opts.node_fill;
+    fill[3] = 77; // ~0.3 opacity
+    let (fill_s, fo) = fill_attrs(fill);
+    let (stroke, so) = stroke_attrs(opts.node_stroke);
+
+    let _ = write!(
+        svg,
+        "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" \
+         rx=\"{r}\" ry=\"{r}\" fill=\"{fill_s}\"{fo} stroke=\"{stroke}\"{so} \
+         stroke-width=\"{STROKE_W}\" stroke-dasharray=\"4 3\"/>",
+        r = CORNER_R,
+    );
+
+    // Title at the top-left, just inside the box.
+    let title = cluster.title.trim();
+    if !title.is_empty() {
+        let (fill_t, to) = fill_attrs(opts.text_color);
+        let family = escape(&opts.font_family);
+        let fs = opts.font_size_px;
+        let tx = x + 6.0;
+        let ty = y + fs * 0.5 + 4.0;
+        let _ = write!(
+            svg,
+            "<text x=\"{tx:.2}\" y=\"{ty:.2}\" text-anchor=\"start\" \
+             dominant-baseline=\"central\" font-family=\"{family}\" \
+             font-size=\"{fs}\" fill=\"{fill_t}\"{to}>{}</text>",
+            escape(title),
+        );
+    }
+}
+
 /// One edge polyline. Points are already clipped to node borders; when an
 /// arrowhead is present we pull the terminal segment back by `ARROW_LEN` so the
 /// triangle's tip (not its base) lands on the border.
@@ -104,14 +152,16 @@ fn emit_edge(svg: &mut String, edge: &PositionedEdge, opts: &MermaidOptions) {
         let _ = write!(d, "{cmd}{x:.2},{y:.2} ");
     }
 
-    let (stroke, so) = stroke_attrs(opts.edge_stroke);
-    let width = match edge.kind {
+    let (stroke, so) = stroke_attrs(edge.style.stroke.unwrap_or(opts.edge_stroke));
+    let kind_width = match edge.kind {
         EdgeKind::Thick => THICK_W,
         _ => STROKE_W,
     };
-    let dash = match edge.kind {
-        EdgeKind::Dotted => " stroke-dasharray=\"4 3\"",
-        _ => "",
+    let width = edge.style.stroke_width.unwrap_or(kind_width);
+    let dash = if edge.style.dashed || edge.kind == EdgeKind::Dotted {
+        " stroke-dasharray=\"4 3\""
+    } else {
+        ""
     };
     let marker_end = if edge.arrow_end { " marker-end=\"url(#arrow)\"" } else { "" };
     let marker_start = if edge.arrow_start { " marker-start=\"url(#arrow-start)\"" } else { "" };
@@ -161,14 +211,16 @@ fn emit_edge_label(svg: &mut String, edge: &PositionedEdge, opts: &MermaidOption
     let bw = tw + 2.0 * pad;
     let bh = th + 2.0 * pad;
 
-    // Light background so the label reads over the edge line.
+    // Background matches the canvas so the label reads over the edge line on
+    // any theme (light or dark).
     let _ = write!(
         svg,
-        "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{bw:.2}\" height=\"{bh:.2}\" fill=\"rgb(255,255,255)\" fill-opacity=\"0.85\"/>",
+        "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{bw:.2}\" height=\"{bh:.2}\" fill=\"{bg}\"/>",
         x = cx - bw / 2.0,
         y = cy - bh / 2.0,
+        bg = crate::svgutil::rgb(opts.background),
     );
-    emit_text(svg, label, cx, cy, opts);
+    emit_text(svg, label, cx, cy, opts.text_color, opts);
 }
 
 /// One node: its shape outline then its (possibly multi-line) label.
@@ -176,9 +228,11 @@ fn emit_node(svg: &mut String, node: &PositionedNode, opts: &MermaidOptions) {
     let PositionedNode { cx, cy, w, h, shape, label, .. } = node;
     let (cx, cy, w, h) = (*cx, *cy, *w, *h);
     let (x, y) = (cx - w / 2.0, cy - h / 2.0);
-    let (fill, fo) = fill_attrs(opts.node_fill);
-    let (stroke, so) = stroke_attrs(opts.node_stroke);
-    let style = format!("fill=\"{fill}\"{fo} stroke=\"{stroke}\"{so} stroke-width=\"{STROKE_W}\"");
+    // Per-node style overrides fall back to the theme/options defaults.
+    let (fill, fo) = fill_attrs(node.style.fill.unwrap_or(opts.node_fill));
+    let (stroke, so) = stroke_attrs(node.style.stroke.unwrap_or(opts.node_stroke));
+    let sw = node.style.stroke_width.unwrap_or(STROKE_W);
+    let style = format!("fill=\"{fill}\"{fo} stroke=\"{stroke}\"{so} stroke-width=\"{sw}\"");
 
     match shape {
         NodeShape::Rect => {
@@ -237,16 +291,28 @@ fn emit_node(svg: &mut String, node: &PositionedNode, opts: &MermaidOptions) {
         }
     }
 
-    emit_text(svg, label, cx, cy, opts);
+    let text_color = node.style.text_color.unwrap_or(opts.text_color);
+    // Rich label: markdown emphasis, `<br>`/`\n` lines, and inline `$…$` math.
+    // Plain labels render as a single centered `<text>`, identical to before.
+    crate::label::emit(
+        svg,
+        label,
+        cx,
+        cy,
+        crate::label::Anchor::Middle,
+        opts.font_size_px,
+        text_color,
+        &opts.font_family,
+    );
 }
 
 /// A centered `<text>` at `(cx, cy)`; multi-line labels (`\n`) become `<tspan>`
-/// rows vertically centered around `cy`.
-fn emit_text(svg: &mut String, label: &str, cx: f32, cy: f32, opts: &MermaidOptions) {
+/// rows vertically centered around `cy`. `color` is the resolved text color.
+fn emit_text(svg: &mut String, label: &str, cx: f32, cy: f32, color: [u8; 4], opts: &MermaidOptions) {
     if label.is_empty() {
         return;
     }
-    let (fill, fo) = fill_attrs(opts.text_color);
+    let (fill, fo) = fill_attrs(color);
     let family = escape(&opts.font_family);
     let fs = opts.font_size_px;
 
@@ -346,6 +412,7 @@ mod tests {
                 arrow_end: true,
                 style: Default::default(),
             }],
+            clusters: vec![],
             width: 100.0,
             height: 150.0,
         }
@@ -388,6 +455,7 @@ mod tests {
         let d = PositionedDiagram {
             nodes: vec![node("C", NodeShape::Circle, 40.0, 40.0)],
             edges: vec![],
+            clusters: vec![],
             width: 80.0,
             height: 80.0,
         };
@@ -432,6 +500,61 @@ mod tests {
     }
 
     #[test]
+    fn styled_node_uses_override_fill() {
+        use crate::model::ElemStyle;
+        let mut d = small_diagram();
+        d.nodes[0].style = ElemStyle {
+            fill: Some([255, 0, 0, 255]),
+            stroke: Some([0, 0, 255, 255]),
+            stroke_width: Some(5.0),
+            ..Default::default()
+        };
+        let svg = draw_svg(&d, &MermaidOptions::default());
+        // Node A's rect uses the override fill/stroke/width.
+        assert!(svg.contains("fill=\"rgb(255,0,0)\""), "got: {svg}");
+        assert!(svg.contains("stroke=\"rgb(0,0,255)\""));
+        assert!(svg.contains("stroke-width=\"5\""));
+    }
+
+    #[test]
+    fn unstyled_node_uses_opts_fill() {
+        let d = small_diagram();
+        let opts = MermaidOptions::default();
+        let svg = draw_svg(&d, &opts);
+        let [r, g, b, _] = opts.node_fill;
+        assert!(
+            svg.contains(&format!("fill=\"rgb({r},{g},{b})\"")),
+            "expected default node fill rgb({r},{g},{b})"
+        );
+    }
+
+    #[test]
+    fn styled_edge_uses_override_stroke() {
+        use crate::model::ElemStyle;
+        let mut d = small_diagram();
+        d.edges[0].style = ElemStyle {
+            stroke: Some([0, 128, 0, 255]),
+            stroke_width: Some(6.0),
+            dashed: true,
+            ..Default::default()
+        };
+        let svg = draw_svg(&d, &MermaidOptions::default());
+        assert!(svg.contains("stroke=\"rgb(0,128,0)\""), "got: {svg}");
+        assert!(svg.contains("stroke-width=\"6\""));
+        assert!(svg.contains("stroke-dasharray=\"4 3\""));
+    }
+
+    #[test]
+    fn edge_label_bg_uses_background_color() {
+        let mut opts = MermaidOptions::default();
+        opts.background = [10, 20, 30, 255];
+        let svg = draw_svg(&small_diagram(), &opts);
+        // The edge-label background rect uses the canvas background, full opacity.
+        assert!(svg.contains("fill=\"rgb(10,20,30)\""), "got: {svg}");
+        assert!(!svg.contains("fill-opacity=\"0.85\""));
+    }
+
+    #[test]
     fn markers_referenced_only_when_arrows_present() {
         let mut d = small_diagram();
         d.edges[0].arrow_end = false;
@@ -445,5 +568,65 @@ mod tests {
         let svg = draw_svg(&d, &MermaidOptions::default());
         assert!(svg.contains("marker-end=\"url(#arrow)\""));
         assert!(svg.contains("marker-start=\"url(#arrow-start)\""));
+    }
+
+    #[test]
+    fn cluster_rect_and_title_drawn_before_nodes() {
+        let mut d = small_diagram();
+        d.clusters = vec![PositionedCluster {
+            title: "Group One".to_string(),
+            x: 10.0,
+            y: 10.0,
+            w: 80.0,
+            h: 120.0,
+        }];
+        let svg = draw_svg(&d, &MermaidOptions::default());
+
+        // The cluster's title text appears.
+        assert!(svg.contains("Group One"), "cluster title missing: {svg}");
+        // A dashed cluster <rect> is present (faint fill via fill-opacity).
+        assert!(svg.contains("stroke-dasharray=\"4 3\""));
+
+        // The cluster box is drawn before the node shapes: the title text must
+        // come before node A's text label in document order.
+        let cluster_pos = svg.find("Group One").unwrap();
+        let node_a_pos = svg.find(">A<").unwrap();
+        assert!(cluster_pos < node_a_pos, "cluster drawn before nodes");
+    }
+
+    #[test]
+    fn rich_node_label_renders_bold() {
+        let mut d = small_diagram();
+        d.nodes[0].label = "**bold**".to_string();
+        let svg = draw_svg(&d, &MermaidOptions::default());
+        assert!(svg.contains("font-weight=\"bold\""), "got: {svg}");
+    }
+
+    #[test]
+    fn rich_node_label_br_is_taller() {
+        // A two-line (<br>) node label produces two <text> rows for that node.
+        let mut d = small_diagram();
+        d.nodes[0].label = "A<br>B".to_string();
+        let svg = draw_svg(&d, &MermaidOptions::default());
+        // Node A now emits two <text> rows; node B + edge label add more.
+        assert!(svg.matches("<text").count() >= 4, "got: {svg}");
+    }
+
+    #[test]
+    fn plain_node_label_still_centered_text() {
+        // Existing plain-label look: one centered <text> with the literal label.
+        let svg = draw_svg(&small_diagram(), &MermaidOptions::default());
+        assert!(svg.contains(">A<"), "plain label A missing: {svg}");
+        assert!(svg.contains("text-anchor=\"middle\""));
+        assert!(svg.contains("dominant-baseline=\"central\""));
+    }
+
+    #[test]
+    fn no_clusters_when_empty() {
+        // The default small_diagram has no clusters → no cluster boxes, unchanged.
+        let svg = draw_svg(&small_diagram(), &MermaidOptions::default());
+        // Only the edge label carries a dasharray-free background; clusters would
+        // add a dashed rect, which must be absent here.
+        assert!(!svg.contains("stroke-dasharray=\"4 3\""));
     }
 }

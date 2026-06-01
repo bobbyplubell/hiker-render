@@ -439,6 +439,17 @@ const PALETTE: [[u8; 4]; 10] = [
     [222, 196, 156, 255],
 ];
 
+/// The section base color (RGBA) for palette slot `i` (cycling). Prefers the
+/// active theme's `series_palette` when set, falling back to the local
+/// [`PALETTE`].
+fn palette_color(opts: &MermaidOptions, i: usize) -> [u8; 4] {
+    if !opts.series_palette.is_empty() {
+        opts.series_palette[i % opts.series_palette.len()]
+    } else {
+        PALETTE[i % PALETTE.len()]
+    }
+}
+
 const PLOT_W: f64 = 600.0;
 const PLOT_H: f64 = 450.0;
 const MARGIN: f64 = 16.0;
@@ -573,7 +584,7 @@ fn draw_branch(svg: &mut String, tile: &Tile, opts: &MermaidOptions, header_h: f
     if r.w <= 0.0 || r.h <= 0.0 {
         return;
     }
-    let base = PALETTE[tile.palette % PALETTE.len()];
+    let base = palette_color(opts, tile.palette);
     // Branch header band tinted lighter the deeper it is.
     let fill = lighten(base, 0.35 + 0.12 * tile.depth as f64);
     let stroke = opts.node_stroke;
@@ -621,7 +632,7 @@ fn draw_leaf(svg: &mut String, tile: &Tile, opts: &MermaidOptions) {
     if r.w <= 0.0 || r.h <= 0.0 {
         return;
     }
-    let base = PALETTE[tile.palette % PALETTE.len()];
+    let base = palette_color(opts, tile.palette);
     let fill = lighten(base, (0.05 + 0.1 * tile.depth as f64).min(0.45));
 
     svg.push_str(&format!(

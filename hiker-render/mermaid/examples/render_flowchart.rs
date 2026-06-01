@@ -147,6 +147,14 @@ fn samples() -> Vec<(&'static str, &'static str)> {
             "venn",
             "venn\n    title Hobbies\n    set \"Music\": Alice, Bob, Carol\n    set \"Sports\": Bob, Carol, Dave\n    set \"Art\": Carol, Eve",
         ),
+        ("info", "info"),
+        ("treeview", "treeView-beta\n    src\n      main.rs\n      lib.rs\n    tests\n      smoke.rs"),
+        ("cynefin", "cynefin-beta\n    title Cynefin\n    complex\n        \"New product\"\n    complicated\n        \"Scaling up\"\n    clear\n        \"Run payroll\"\n    chaotic\n        \"Site outage\""),
+        ("wardley", "wardley-beta\n    title Tea Shop\n    component Customer [0.9, 0.5]\n    component Cup of Tea [0.7, 0.6]\n    component Kettle [0.3, 0.8]\n    Customer -> Cup of Tea\n    Cup of Tea -> Kettle"),
+        ("ishikawa", "ishikawa\n    Defects\n        Machine\n            Wear\n        Method\n            Unclear steps\n        Material\n            Bad supplier"),
+        ("eventmodeling", "eventmodeling\n    tf 1 ui Order.Form\n    tf 2 cmd Order.Place\n    tf 3 evt Order.Placed\n    tf 4 rmo Order.List"),
+        ("architecture", "architecture-beta\n    group api(cloud)[API]\n    service db(database)[Database] in api\n    service server(server)[Server] in api\n    db:L -- R:server"),
+        ("railroad", "railroad-ebnf\n    expr = term { \"+\" term } ;\n    term = \"a\" | \"b\" | ( expr ) ;"),
     ]
 }
 
@@ -215,6 +223,9 @@ fn rasterize(svg: &str, w: f32, h: f32, png_path: &str) {
     {
         let db = opt.fontdb_mut();
         db.load_system_fonts();
+        // Load the exact font the renderer measured with, so glyph
+        // widths match the laid-out boxes even without it installed.
+        db.load_font_data(hiker_mermaid::font::FONT_BYTES.to_vec());
         // fontdb defaults the generic `sans-serif` family to "Arial", which is
         // absent on Linux, so `<text font-family="sans-serif">` would resolve to
         // nothing. Point the generics at fonts that are actually installed.

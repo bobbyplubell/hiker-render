@@ -23,22 +23,15 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-/// Font-free heuristic intrinsic text size for a (possibly multi-line, `\n`)
-/// label: width = widest line's char count × `CHAR_ADVANCE_EM` × font size,
-/// height = line count × `LINE_HEIGHT_EM` × font size. Same rule the flowchart
-/// `measure` stage uses, so node sizing is consistent across diagram types.
+/// Intrinsic text size for a (possibly multi-line, `\n`) label: width = widest
+/// line's advance, height = line count × `LINE_HEIGHT_EM` × font size.
+///
+/// Backed by real glyph advances from the bundled font (see [`crate::font`]) so
+/// boxes hug the text — `iiii` is narrow, `WWWW` is wide. All diagram modules
+/// call this, so sizing is consistent across types and matches what the
+/// rasterizer draws.
 pub fn text_size(label: &str, font_size: f32) -> (f32, f32) {
-    let mut max_chars = 0usize;
-    let mut lines = 0usize;
-    for line in label.split('\n') {
-        max_chars = max_chars.max(line.chars().count());
-        lines += 1;
-    }
-    let lines = lines.max(1);
-    (
-        max_chars as f32 * font_size * CHAR_ADVANCE_EM,
-        lines as f32 * font_size * LINE_HEIGHT_EM,
-    )
+    crate::font::text_size(label, font_size)
 }
 
 /// `rgb(r,g,b)` string for a straight (un-premultiplied) RGBA color. Alpha is

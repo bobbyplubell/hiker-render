@@ -8,6 +8,12 @@ description = "Pure-Rust mermaid diagram renderer (flowcharts first) → SVG. La
 # Graph layout engine (dagre/Sugiyama port + tree/force). Flowcharts use the
 # layered (dagre) layout. egui-free, std-only.
 hiker-graph = { path = "../graph" }
+# Real text measurement at layout time: read glyph advances from the bundled
+# Liberation Sans (SIL OFL — see fonts/LICENSE) so node boxes hug their labels.
+ttf-parser = "0.25"
+# Pure-Rust LaTeX math engine — renders `$…$` spans in labels to embedded SVG
+# (mermaid uses KaTeX/JS for this; we do it in-process, no JS).
+hiker-math = { path = "../math" }
 
 [dev-dependencies]
 # Eyeball-only: rasterize the SVG output to PNG in the example/tests, and the

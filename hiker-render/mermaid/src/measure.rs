@@ -1,45 +1,17 @@
-//! Stage 2: measure a node's box size from its label + shape. Upstream: text
-//! metrics (heuristic for v1).
+//! Stage 2: measure a node's box size from its label + shape.
 //!
-//! v1 uses a **font-free heuristic**: a fixed per-character advance times the
-//! font size. This deliberately avoids a font dependency so `measure` (and thus
-//! `layout`) is pure and cheap; the trade-off is that the boxes won't match the
-//! real shaped glyph widths exactly (narrow text gets a bit of slack, very wide
-//! glyphs may overflow slightly). It should later be replaced with real font
-//! metrics (e.g. shaping via the same fontdb that `draw`'s `<text>` resolves
-//! against) so the box hugs the rendered glyphs.
+//! The label's intrinsic text size comes from [`crate::label::measure`], which
+//! handles the rich-label features (markdown emphasis, `<br>`/`\n` lines, and
+//! inline `$…$` math) and falls back to real font metrics ([`crate::font`]) for
+//! plain labels. This module adds the per-shape padding/allowance so the label
+//! visibly fits inside the outline.
 
 use crate::MermaidOptions;
 use crate::model::NodeShape;
 
-/// Average glyph advance as a fraction of the font size. ~0.6 em is a decent
-/// mean for proportional sans-serif text (digits/lowercase narrower, caps/wide
-/// glyphs wider) — a heuristic, see module docs.
-const CHAR_ADVANCE_EM: f32 = 0.6;
-/// Line height as a fraction of the font size.
-const LINE_HEIGHT_EM: f32 = 1.2;
-
 /// Minimum box dimensions so a 1-char or empty label isn't degenerate.
 const MIN_W: f32 = 24.0;
 const MIN_H: f32 = 20.0;
-
-/// Heuristic intrinsic text-block size for `label` (no padding/shape allowance).
-///
-/// Multi-line (`\n`-separated) labels take the widest line for width and
-/// `line_count` lines for height. An empty label still reports one line tall so
-/// nodes keep a sensible minimum height.
-fn text_size(label: &str, font_size: f32) -> (f32, f32) {
-    let mut max_chars = 0usize;
-    let mut lines = 0usize;
-    for line in label.split('\n') {
-        max_chars = max_chars.max(line.chars().count());
-        lines += 1;
-    }
-    let lines = lines.max(1);
-    let text_w = max_chars as f32 * font_size * CHAR_ADVANCE_EM;
-    let text_h = lines as f32 * font_size * LINE_HEIGHT_EM;
-    (text_w, text_h)
-}
 
 /// Return the `(width, height)` in CSS px for a node box that comfortably holds
 /// `label` (with `opts` padding) given its `shape`. Diamonds/circles need extra
@@ -48,7 +20,9 @@ fn text_size(label: &str, font_size: f32) -> (f32, f32) {
 /// Sizing is a heuristic (see module docs): text size from a per-char advance,
 /// then a per-shape allowance so the label visibly fits inside the outline.
 pub fn measure_node(label: &str, shape: NodeShape, opts: &MermaidOptions) -> (f32, f32) {
-    let (text_w, text_h) = text_size(label, opts.font_size_px);
+    // Rich measurement: bold/italic widen, `<br>`/`\n` add lines, `$…$` math
+    // contributes its rendered box. Plain labels measure exactly as before.
+    let (text_w, text_h) = crate::label::measure(label, opts.font_size_px);
     let pad_x = opts.node_padding_x;
     let pad_y = opts.node_padding_y;
 

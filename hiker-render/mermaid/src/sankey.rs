@@ -295,6 +295,16 @@ const PALETTE: [[u8; 4]; 10] = [
     [102, 102, 204, 255], // indigo
 ];
 
+/// The palette color (RGBA) for node index `i` (cycling). Prefers the active
+/// theme's `series_palette` when set, falling back to the local [`PALETTE`].
+fn palette_color(opts: &MermaidOptions, i: usize) -> [u8; 4] {
+    if !opts.series_palette.is_empty() {
+        opts.series_palette[i % opts.series_palette.len()]
+    } else {
+        PALETTE[i % PALETTE.len()]
+    }
+}
+
 /// Render a mermaid sankey diagram to SVG.
 pub fn render_sankey(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, MermaidError> {
     let sankey = parse_sankey(src).map_err(MermaidError::Parse)?;
@@ -449,7 +459,7 @@ pub fn render_sankey(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, 
         let cx0 = x0 + (x1 - x0) * 0.55;
         let cx1 = x1 - (x1 - x0) * 0.55;
 
-        let color = PALETTE[l.source % PALETTE.len()];
+        let color = palette_color(opts, l.source);
         let mut fill_alpha = color;
         fill_alpha[3] = 102; // ~0.4
 
@@ -468,7 +478,7 @@ pub fn render_sankey(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, 
     // Node bars + labels on top.
     for i in 0..n {
         let b = &boxes[i];
-        let color = PALETTE[i % PALETTE.len()];
+        let color = palette_color(opts, i);
         let _ = write!(
             svg,
             "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"{}\"{} \

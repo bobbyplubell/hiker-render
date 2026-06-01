@@ -7,16 +7,272 @@
 //! association/dependency arrow, aggregation/composition diamond), dashed for
 //! `..` (dependency / realization) lines.
 //!
-//! Skipped (noted, not parsed specially): generics `~T~`, annotations
-//! `<<interface>>`, namespaces, cardinality/multiplicity labels, and `note`.
+//! Supported extras: generics `~T~` (e.g. `List~int~` renders `List<int>`,
+//! but relationships match the base `List` id), annotations / stereotypes
+//! `<<interface>>` (rendered «interface» in italics above the class name, both
+//! the in-body and standalone forms), and `note`s (`note for Class "text"` and
+//! floating `note "text"`).
+//!
+//! Skipped (noted, not parsed specially): namespaces and cardinality/
+//! multiplicity labels.
 
 use std::fmt::Write as _;
 
 use crate::svgutil::{edge_label_anchor, escape, opacity_attr, rgb, text_size, LINE_HEIGHT_EM};
 use crate::{MermaidError, MermaidOptions, MermaidRender};
 
+use crate::model::ElemStyle;
 use hiker_graph::layered::RankDir;
 use hiker_graph::{GraphInput, LayeredEngine, LayoutEngine, Vec2};
+
+// ── Styling directives (classDef / class / cssClass / style / :::) ────────────
+//
+// A small, self-contained re-implementation of the flowchart styling parser
+// (`parse.rs`), mirroring its syntax/semantics: same prop names (`fill`,
+// `stroke`, `stroke-width`, `color`, `stroke-dasharray`), same color formats
+// (`#rgb` / `#rrggbb` / `#rrggbbaa` / `rgb()` / `rgba()` / 16 named colors), and
+// the same two-pass resolve (classDef-via-`class` first, inline `style` on top).
+
+/// Directive state collected during parsing, resolved onto classes at the end.
+#[derive(Default)]
+struct Directives {
+    /// Named `classDef` styles.
+    class_defs: std::collections::HashMap<String, ElemStyle>,
+    /// `(element id, class name)` assignments from `class A,B name`,
+    /// `cssClass "A" name`, and `A:::name`.
+    class_assignments: Vec<(String, String)>,
+    /// Inline `style <id> ...` overrides applied directly to an element.
+    inline: Vec<(String, ElemStyle)>,
+}
+
+impl Directives {
+    /// Try to parse `line` as a styling directive. Returns `true` if it was a
+    /// recognized directive keyword line (and should not be parsed further).
+    fn try_parse(&mut self, line: &str) -> bool {
+        let mut words = line.split_whitespace();
+        let kw = match words.next() {
+            Some(k) => k,
+            None => return false,
+        };
+        match kw {
+            "classDef" => {
+                let rest = line[kw.len()..].trim_start();
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                if let Some(name) = parts.next().filter(|n| !n.is_empty()) {
+                    let props = parts.next().unwrap_or("");
+                    self.class_defs
+                        .insert(name.to_string(), parse_style_props(props));
+                }
+                true
+            }
+            "class" => {
+                // class <id1>,<id2>,... <className>
+                let rest = line[kw.len()..].trim_start();
+                if let Some(sp) = rest.rfind(char::is_whitespace) {
+                    let ids = rest[..sp].trim();
+                    let class_name = rest[sp..].trim();
+                    if !class_name.is_empty() {
+                        for id in ids.split(',') {
+                            let id = id.trim();
+                            if !id.is_empty() {
+                                self.class_assignments
+                                    .push((id.to_string(), class_name.to_string()));
+                            }
+                        }
+                    }
+                }
+                true
+            }
+            "cssClass" => {
+                // cssClass "<id>" <className>  (mermaid class-diagram form)
+                let rest = line[kw.len()..].trim_start();
+                if let Some(sp) = rest.rfind(char::is_whitespace) {
+                    let ids = rest[..sp].trim().trim_matches('"');
+                    let class_name = rest[sp..].trim();
+                    if !class_name.is_empty() {
+                        for id in ids.split(',') {
+                            let id = id.trim().trim_matches('"');
+                            if !id.is_empty() {
+                                self.class_assignments
+                                    .push((id.to_string(), class_name.to_string()));
+                            }
+                        }
+                    }
+                }
+                true
+            }
+            "style" => {
+                // style <id> <prop:val,...>
+                let rest = line[kw.len()..].trim_start();
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                if let Some(id) = parts.next().filter(|n| !n.is_empty()) {
+                    let props = parts.next().unwrap_or("");
+                    self.inline.push((id.to_string(), parse_style_props(props)));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Record an `id:::className` shorthand assignment.
+    fn add_shorthand(&mut self, id: &str, class_name: &str) {
+        if !id.is_empty() && !class_name.is_empty() {
+            self.class_assignments
+                .push((id.to_string(), class_name.to_string()));
+        }
+    }
+
+    /// Resolve the collected directives onto each class's `style`: classDef-via-
+    /// `class` first, then inline `style` overrides on top.
+    fn resolve(&self, classes: &mut [Class]) {
+        for (id, class_name) in &self.class_assignments {
+            if let Some(cs) = self.class_defs.get(class_name) {
+                if let Some(c) = classes.iter_mut().find(|c| c.name == *id) {
+                    merge_style(&mut c.style, cs);
+                }
+            }
+        }
+        for (id, st) in &self.inline {
+            if let Some(c) = classes.iter_mut().find(|c| c.name == *id) {
+                merge_style(&mut c.style, st);
+            }
+        }
+    }
+}
+
+/// Merge `src` into `dst` field-by-field: any set field in `src` wins.
+fn merge_style(dst: &mut ElemStyle, src: &ElemStyle) {
+    if src.fill.is_some() {
+        dst.fill = src.fill;
+    }
+    if src.stroke.is_some() {
+        dst.stroke = src.stroke;
+    }
+    if src.stroke_width.is_some() {
+        dst.stroke_width = src.stroke_width;
+    }
+    if src.text_color.is_some() {
+        dst.text_color = src.text_color;
+    }
+    if src.dashed {
+        dst.dashed = true;
+    }
+}
+
+/// Parse a `prop:val,prop:val,...` list into an [`ElemStyle`]. Unknown props or
+/// unparseable colors are skipped leniently.
+fn parse_style_props(props: &str) -> ElemStyle {
+    let mut style = ElemStyle::default();
+    for part in props.split(',') {
+        let (key, val) = match part.split_once(':') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+        match key {
+            "fill" => style.fill = parse_color(val).or(style.fill),
+            "stroke" => style.stroke = parse_color(val).or(style.stroke),
+            "color" => style.text_color = parse_color(val).or(style.text_color),
+            "stroke-width" => {
+                if let Some(w) = val.trim_end_matches("px").trim().parse::<f32>().ok() {
+                    style.stroke_width = Some(w);
+                }
+            }
+            "stroke-dasharray" => {
+                if !val.is_empty() {
+                    style.dashed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    style
+}
+
+/// Parse a CSS-ish color into straight RGBA. Returns `None` on anything
+/// unrecognized so the caller can skip the prop.
+fn parse_color(s: &str) -> Option<[u8; 4]> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        return parse_hex_color(hex);
+    }
+    if let Some(inner) = s.strip_prefix("rgba(").and_then(|x| x.strip_suffix(')')) {
+        return parse_rgb_func(inner, true);
+    }
+    if let Some(inner) = s.strip_prefix("rgb(").and_then(|x| x.strip_suffix(')')) {
+        return parse_rgb_func(inner, false);
+    }
+    parse_named_color(s)
+}
+
+fn parse_hex_color(h: &str) -> Option<[u8; 4]> {
+    let h = h.trim();
+    match h.len() {
+        3 => {
+            let r = u8::from_str_radix(&h[0..1], 16).ok()?;
+            let g = u8::from_str_radix(&h[1..2], 16).ok()?;
+            let b = u8::from_str_radix(&h[2..3], 16).ok()?;
+            Some([r * 17, g * 17, b * 17, 255])
+        }
+        6 => Some([
+            u8::from_str_radix(&h[0..2], 16).ok()?,
+            u8::from_str_radix(&h[2..4], 16).ok()?,
+            u8::from_str_radix(&h[4..6], 16).ok()?,
+            255,
+        ]),
+        8 => Some([
+            u8::from_str_radix(&h[0..2], 16).ok()?,
+            u8::from_str_radix(&h[2..4], 16).ok()?,
+            u8::from_str_radix(&h[4..6], 16).ok()?,
+            u8::from_str_radix(&h[6..8], 16).ok()?,
+        ]),
+        _ => None,
+    }
+}
+
+fn parse_rgb_func(inner: &str, with_alpha: bool) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+    if parts.len() != if with_alpha { 4 } else { 3 } {
+        return None;
+    }
+    let r = parts[0].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let g = parts[1].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let b = parts[2].parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8;
+    let a = if with_alpha {
+        let av = parts[3].parse::<f32>().ok()?;
+        if av <= 1.0 {
+            (av * 255.0).round().clamp(0.0, 255.0) as u8
+        } else {
+            av.round().clamp(0.0, 255.0) as u8
+        }
+    } else {
+        255
+    };
+    Some([r, g, b, a])
+}
+
+fn parse_named_color(name: &str) -> Option<[u8; 4]> {
+    let c = match name.to_ascii_lowercase().as_str() {
+        "red" => [255, 0, 0],
+        "green" => [0, 128, 0],
+        "blue" => [0, 0, 255],
+        "black" => [0, 0, 0],
+        "white" => [255, 255, 255],
+        "yellow" => [255, 255, 0],
+        "orange" => [255, 165, 0],
+        "purple" => [128, 0, 128],
+        "gray" | "grey" => [128, 128, 128],
+        "lightblue" => [173, 216, 230],
+        "lightgreen" => [144, 238, 144],
+        "pink" => [255, 192, 203],
+        "cyan" => [0, 255, 255],
+        "magenta" => [255, 0, 255],
+        "brown" => [165, 42, 42],
+        "lightgray" | "lightgrey" => [211, 211, 211],
+        _ => return None,
+    };
+    Some([c[0], c[1], c[2], 255])
+}
 
 // ── Model ───────────────────────────────────────────────────────────────────
 
@@ -30,11 +286,30 @@ pub struct Member {
 }
 
 /// A parsed class: a name plus its attribute and method compartments.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Class {
+    /// The bare id used for relationship matching (generic suffix stripped).
     pub name: String,
+    /// The displayed name in the name compartment. Differs from `name` when the
+    /// class carries a generic suffix (e.g. id `List`, display `List<int>`).
+    pub display_name: String,
+    /// Stereotype/annotation, without the `<<` `>>` (e.g. `interface`). Rendered
+    /// «interface» in italics above the class name. Last one wins.
+    pub annotation: Option<String>,
     pub attributes: Vec<Member>,
     pub methods: Vec<Member>,
+    /// Per-class style overrides (from `classDef`/`class`/`cssClass`/`style`/`:::`).
+    pub style: ElemStyle,
+}
+
+/// A note rectangle: either attached to a class (`note for Class "text"`) or
+/// floating (`note "text"`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    /// Note body text.
+    pub text: String,
+    /// The class id this note is attached to, if any (floating note → `None`).
+    pub for_class: Option<String>,
 }
 
 /// Which UML marker a relationship carries and at which end.
@@ -70,23 +345,44 @@ pub struct Relation {
 }
 
 /// A parsed class diagram. `classes` is in first-seen order.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClassDiagram {
     pub classes: Vec<Class>,
     pub relations: Vec<Relation>,
+    pub notes: Vec<Note>,
 }
 
 impl ClassDiagram {
     /// Index of `name`, inserting an empty class if not present (auto-create).
+    /// The display name defaults to the id; use [`ensure_named`] to set a
+    /// distinct (generic) display.
     fn ensure(&mut self, name: &str) -> usize {
+        self.ensure_named(name, name)
+    }
+
+    /// Like [`ensure`], but sets `display_name` for a freshly created class (or
+    /// upgrades a placeholder whose display still equals its id, e.g. one
+    /// auto-created from a relationship before the `List~int~` definition).
+    fn ensure_named(&mut self, name: &str, display: &str) -> usize {
         if let Some(i) = self.classes.iter().position(|c| c.name == name) {
+            let c = &mut self.classes[i];
+            if c.display_name == c.name && display != name {
+                c.display_name = display.to_string();
+            }
             return i;
         }
         self.classes.push(Class {
             name: name.to_string(),
+            display_name: display.to_string(),
             ..Class::default()
         });
         self.classes.len() - 1
+    }
+
+    /// Record a stereotype/annotation (without `<<` `>>`) on a class.
+    fn annotate(&mut self, class: &str, annotation: &str) {
+        let i = self.ensure(class);
+        self.classes[i].annotation = Some(annotation.trim().to_string());
     }
 
     fn add_member(&mut self, class: &str, raw: &str) {
@@ -102,8 +398,8 @@ impl ClassDiagram {
 
 // ── Parse ───────────────────────────────────────────────────────────────────
 
-/// Strip a trailing generic suffix like `~T~` / `~K, V~` from a bare class name
-/// (generics are skipped — the name keeps its base).
+/// Strip a trailing generic suffix like `~T~` / `~K, V~` from a bare class name,
+/// returning the base id used for relationship matching.
 fn strip_generic(name: &str) -> &str {
     match name.find('~') {
         Some(i) => name[..i].trim(),
@@ -111,9 +407,54 @@ fn strip_generic(name: &str) -> &str {
     }
 }
 
-/// Parse one member text into a [`Member`], classifying method vs attribute.
+/// Split a class name into `(base_id, display)`. A generic suffix `~K, V~`
+/// becomes `<K, V>` in the display; the base id has it removed. Mermaid uses the
+/// first two `~`-delimited segments: `List~int~` → base `List`, generic `int`.
+fn split_generic(name: &str) -> (String, String) {
+    let name = name.trim();
+    match name.split_once('~') {
+        Some((base, rest)) => {
+            let base = base.trim();
+            // The generic body runs to the closing `~` (if any).
+            let inner = rest.split_once('~').map(|(g, _)| g).unwrap_or(rest).trim();
+            let display = if inner.is_empty() {
+                base.to_string()
+            } else {
+                format!("{base}<{inner}>")
+            };
+            (base.to_string(), display)
+        }
+        None => (name.to_string(), name.to_string()),
+    }
+}
+
+/// Convert any `~…~` generic markers in arbitrary member text to `<…>` for
+/// display (e.g. `+List~int~ items` → `+List<int> items`). Pairs of `~` become
+/// `<`/`>`; an unpaired trailing `~` is left as-is.
+fn generics_to_angles(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut open = false;
+    for ch in text.chars() {
+        if ch == '~' {
+            out.push(if open { '>' } else { '<' });
+            open = !open;
+        } else {
+            out.push(ch);
+        }
+    }
+    // Unbalanced: a lone `~` was turned into `<`; restore it to a literal `~`.
+    if open {
+        if let Some(pos) = out.rfind('<') {
+            out.replace_range(pos..pos + 1, "~");
+        }
+    }
+    out
+}
+
+/// Parse one member text into a [`Member`], classifying method vs attribute and
+/// converting any generic `~…~` to `<…>` for display.
 fn parse_member(raw: &str) -> Member {
-    let text = raw.trim().to_string();
+    let text = generics_to_angles(raw.trim());
     // A method ends with a `)` somewhere (has a parameter list). Attributes have
     // no parentheses.
     let is_method = text.contains('(') && text.contains(')');
@@ -207,6 +548,69 @@ fn match_relation_earliest(s: &str) -> Option<(&'static str, RelMarker, bool, bo
     best.map(|(_, tok, m, at, d)| (tok, m, at, d))
 }
 
+/// Parse a line that is *only* an annotation `<<interface>>`, returning the
+/// inner text. Returns `None` if the line has trailing text after `>>` (which is
+/// the standalone-with-target form handled separately).
+fn parse_annotation(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let inner = line.strip_prefix("<<")?;
+    let (ann, rest) = inner.split_once(">>")?;
+    if rest.trim().is_empty() {
+        Some(ann.trim())
+    } else {
+        None
+    }
+}
+
+/// Parse the standalone form `<<interface>> Shape`, returning
+/// `(annotation, target_class)`. Returns `None` if there is no target.
+fn parse_standalone_annotation(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    let inner = line.strip_prefix("<<")?;
+    let (ann, rest) = inner.split_once(">>")?;
+    let target = rest.trim();
+    if target.is_empty() {
+        None
+    } else {
+        Some((ann.trim(), target))
+    }
+}
+
+/// Parse a `note for <Class> "text"` or floating `note "text"` line.
+fn parse_note(line: &str) -> Option<Note> {
+    let rest = line.trim().strip_prefix("note")?.trim_start();
+    let (for_class, body) = if let Some(after) = rest.strip_prefix("for ") {
+        // `for <Class> "text"` — the class id runs up to the opening quote (or
+        // to the end if unquoted).
+        let after = after.trim_start();
+        match after.find('"') {
+            Some(q) => (Some(after[..q].trim().to_string()), &after[q..]),
+            None => (Some(after.trim().to_string()), ""),
+        }
+    } else {
+        (None, rest)
+    };
+    let text = unquote(body.trim());
+    if let Some(c) = &for_class {
+        if c.is_empty() {
+            return None;
+        }
+    }
+    Some(Note {
+        text,
+        for_class: for_class.map(|c| strip_generic(&c).to_string()),
+    })
+}
+
+/// Strip a single pair of surrounding double quotes, if present.
+fn unquote(s: &str) -> String {
+    let s = s.trim();
+    s.strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .unwrap_or(s)
+        .to_string()
+}
+
 /// Parse `classDiagram` source. Errors if the header is wrong.
 pub fn parse(src: &str) -> Result<ClassDiagram, String> {
     let mut lines = src.lines().map(|l| l.split("%%").next().unwrap_or("")).peekable();
@@ -224,6 +628,7 @@ pub fn parse(src: &str) -> Result<ClassDiagram, String> {
     }
 
     let mut diagram = ClassDiagram::default();
+    let mut directives = Directives::default();
     // When inside a `class X {` block, the class we are appending members to.
     let mut open_block: Option<String> = None;
 
@@ -239,22 +644,55 @@ pub fn parse(src: &str) -> Result<ClassDiagram, String> {
                 open_block = None;
                 continue;
             }
-            // Skip annotation lines inside the block.
-            if line.starts_with("<<") {
+            // An in-body annotation line `<<interface>>` sets the class
+            // stereotype instead of a member.
+            if let Some(ann) = parse_annotation(line) {
+                diagram.annotate(&cls, ann);
                 continue;
             }
             diagram.add_member(&cls, line);
             continue;
         }
 
+        // Styling directives: `classDef`, `class A,B name`, `cssClass`, `style`.
+        // `class Name { ... }` definitions are handled below, so only treat a
+        // `class …` line as a directive when it is *not* a class definition
+        // (i.e. it carries a trailing class-name token and no `{`).
+        if line.starts_with("classDef")
+            || line.starts_with("cssClass")
+            || line.starts_with("style ")
+        {
+            directives.try_parse(line);
+            continue;
+        }
+
+        // `note for <Class> "text"` / `note "text"`.
+        if line == "note" || line.starts_with("note ") {
+            if let Some(note) = parse_note(line) {
+                if let Some(c) = &note.for_class {
+                    diagram.ensure(c);
+                }
+                diagram.notes.push(note);
+            }
+            continue;
+        }
+
+        // Standalone annotation: `<<interface>> Shape` (or `<<interface>>` alone,
+        // which has no target and is ignored).
+        if line.starts_with("<<") {
+            if let Some((ann, target)) = parse_standalone_annotation(line) {
+                let target = strip_generic(target);
+                if !target.is_empty() {
+                    diagram.annotate(target, ann);
+                }
+            }
+            continue;
+        }
+
         // Skip standalone directives we don't model.
         if line.starts_with("direction")
-            || line.starts_with("note")
             || line.starts_with("namespace")
-            || line.starts_with("<<")
             || line.starts_with("click")
-            || line.starts_with("style")
-            || line.starts_with("cssClass")
             || line.starts_with("callback")
             || line.starts_with("link")
         {
@@ -265,9 +703,10 @@ pub fn parse(src: &str) -> Result<ClassDiagram, String> {
         if let Some(rest) = line.strip_prefix("class ") {
             let rest = rest.trim();
             if let Some(brace) = rest.find('{') {
-                let name = strip_generic(rest[..brace].trim());
+                let (name, display) = split_generic(rest[..brace].trim());
+                let name = name.as_str();
                 let after = rest[brace + 1..].trim();
-                let i = diagram.ensure(name);
+                let i = diagram.ensure_named(name, &display);
                 let _ = i;
                 // Members may follow on the same line, separated, but mermaid
                 // normally puts them on their own lines. If the brace closes on
@@ -288,12 +727,30 @@ pub fn parse(src: &str) -> Result<ClassDiagram, String> {
                         diagram.add_member(name, after);
                     }
                 }
+            } else if !rest.contains(":::")
+                && !rest.contains('~')
+                && rest.split_whitespace().count() >= 2
+            {
+                // `class <id1>,<id2>,... <className>` — a style-assignment
+                // directive, not a definition (two whitespace-delimited groups,
+                // no `:::`, no generic, no body). The classes themselves are
+                // assumed defined elsewhere (assignment alone does not create
+                // them). A generic like `class Map~K, V~` keeps a space inside
+                // its `~…~`, so it is excluded here and handled as a definition.
+                directives.try_parse(line);
             } else {
-                // `class Name` (no body). Also handles `class Name:::cssClass`.
-                let name = rest.split(":::").next().unwrap_or(rest);
-                let name = strip_generic(name.trim());
+                // `class Name` (no body). Also handles `class Name:::cssClass`
+                // and generics `class List~int~`.
+                let (name_part, css) = match rest.split_once(":::") {
+                    Some((n, c)) => (n, Some(c.trim())),
+                    None => (rest, None),
+                };
+                let (name, display) = split_generic(name_part.trim());
                 if !name.is_empty() {
-                    diagram.ensure(name);
+                    diagram.ensure_named(&name, &display);
+                    if let Some(css) = css.filter(|c| !c.is_empty()) {
+                        directives.add_shorthand(&name, css);
+                    }
                 }
             }
             continue;
@@ -302,6 +759,12 @@ pub fn parse(src: &str) -> Result<ClassDiagram, String> {
         // A member line: `ClassName : +int age`.
         // But only if there's no relationship token (relationships may also have
         // a `:` for labels). Detect a relationship token first.
+        // Peel any `<id>:::<className>` shorthands out of the line first (they
+        // contain `:` which would otherwise confuse label/member splitting),
+        // recording the class assignment for each.
+        let line_owned = strip_inline_classes(line, &mut directives);
+        let line = line_owned.as_str();
+
         if match_relation_earliest(line).is_some() {
             if let Some(rel) = parse_relation_line(line) {
                 diagram.ensure(&rel.from);
@@ -312,23 +775,58 @@ pub fn parse(src: &str) -> Result<ClassDiagram, String> {
         }
 
         if let Some((lhs, rhs)) = line.split_once(':') {
-            let cls = strip_generic(lhs.trim());
+            let (cls, display) = split_generic(lhs.trim());
             let member = rhs.trim();
             if !cls.is_empty() && !member.is_empty() {
-                diagram.add_member(cls, member);
+                diagram.ensure_named(&cls, &display);
+                diagram.add_member(&cls, member);
             }
             continue;
         }
 
-        // Bare class reference like `ClassName` on its own line.
-        let bare = strip_generic(line);
+        // Bare class reference like `ClassName` or `List~int~` on its own line
+        // (any `:::css` shorthand was already peeled by `strip_inline_classes`).
+        let (bare, display) = split_generic(line);
         if !bare.is_empty() && bare.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            diagram.ensure(bare);
+            diagram.ensure_named(&bare, &display);
         }
         // Otherwise ignore unrecognized line.
     }
 
+    directives.resolve(&mut diagram.classes);
     Ok(diagram)
+}
+
+/// Remove every `<id>:::<className>` shorthand from `line`, recording each
+/// `(id, className)` assignment into `dir`. The `id` is the run of id-chars
+/// immediately preceding `:::`; the `className` runs to the next non-id char.
+/// Returns the line with the `:::className` portions deleted (id left in place).
+fn strip_inline_classes(line: &str, dir: &mut Directives) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(pos) = rest.find(":::") {
+        // The id is the trailing id-chars of the text before `:::`.
+        let before = &rest[..pos];
+        let id_start = before
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let id = before[id_start..].trim();
+        // The className is the id-chars right after `:::`.
+        let after = &rest[pos + 3..];
+        let name_len = after
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(after.len());
+        let class_name = &after[..name_len];
+        if !id.is_empty() && !class_name.is_empty() {
+            dir.add_shorthand(id, class_name);
+        }
+        // Emit everything up to (and including) the id, drop `:::className`.
+        out.push_str(before);
+        rest = &after[name_len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 // ── Sizing ──────────────────────────────────────────────────────────────────
@@ -361,14 +859,19 @@ fn box_geom(c: &Class, opts: &MermaidOptions) -> BoxGeom {
     let pad_x = opts.node_padding_x;
     let pad_y = opts.node_padding_y;
 
-    // Width: widest of the name and every member line.
-    let mut max_w = text_size(&c.name, fs).0;
+    // Width: widest of the (display) name, any annotation, and every member.
+    let mut max_w = text_size(&c.display_name, fs).0;
+    if let Some(ann) = &c.annotation {
+        max_w = max_w.max(text_size(&format!("«{ann}»"), fs).0);
+    }
     for m in c.attributes.iter().chain(c.methods.iter()) {
         max_w = max_w.max(text_size(&m.text, fs).0);
     }
     let w = max_w + 2.0 * pad_x;
 
-    let name_h = line_h + pad_y;
+    // The name band gets a second line when a stereotype is present.
+    let name_lines = if c.annotation.is_some() { 2.0 } else { 1.0 };
+    let name_h = name_lines * line_h + pad_y;
     let attr_h = band_height(c.attributes.len(), line_h, pad_y);
     let method_h = band_height(c.methods.len(), line_h, pad_y);
     let h = name_h + attr_h + method_h;
@@ -452,6 +955,7 @@ fn layout(diagram: &ClassDiagram, opts: &MermaidOptions) -> Layout {
         edges: &edges,
         node_sizes: Some(&node_sizes),
         edge_label_sizes: Some(&label_sizes),
+        node_parents: None,
         directed: true,
     });
 
@@ -531,14 +1035,16 @@ fn emit_box(svg: &mut String, b: &Positioned, class: &Class, opts: &MermaidOptio
     let g = &b.geom;
     let x = b.cx - g.w / 2.0;
     let y = b.cy - g.h / 2.0;
-    let (fill, fo) = fill_attrs(opts.node_fill);
-    let (stroke, so) = stroke_attrs(opts.node_stroke);
+    // Per-class style overrides, falling back to the theme defaults.
+    let (fill, fo) = fill_attrs(class.style.fill.unwrap_or(opts.node_fill));
+    let (stroke, so) = stroke_attrs(class.style.stroke.unwrap_or(opts.node_stroke));
+    let sw = class.style.stroke_width.unwrap_or(STROKE_W);
 
     // Outer rect.
     let _ = write!(
         svg,
         "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" \
-         fill=\"{fill}\"{fo} stroke=\"{stroke}\"{so} stroke-width=\"{STROKE_W}\"/>",
+         fill=\"{fill}\"{fo} stroke=\"{stroke}\"{so} stroke-width=\"{sw}\"/>",
         w = g.w,
         h = g.h,
     );
@@ -550,27 +1056,44 @@ fn emit_box(svg: &mut String, b: &Positioned, class: &Class, opts: &MermaidOptio
         let _ = write!(
             svg,
             "<line x1=\"{x1:.2}\" y1=\"{dy:.2}\" x2=\"{x2:.2}\" y2=\"{dy:.2}\" \
-             stroke=\"{stroke}\"{so} stroke-width=\"{STROKE_W}\"/>",
+             stroke=\"{stroke}\"{so} stroke-width=\"{sw}\"/>",
             x1 = x,
             x2 = x + g.w,
         );
     }
 
-    // Name (centered, bold) in the top band.
-    let (tfill, tfo) = fill_attrs(opts.text_color);
+    // Name compartment. When a stereotype is present it sits centered in
+    // italics ABOVE the (bold) class name, UML-style; the band is two lines tall.
+    let (tfill, tfo) = fill_attrs(class.style.text_color.unwrap_or(opts.text_color));
     let family = escape(&opts.font_family);
     let fs = opts.font_size_px;
+    let line_h = fs * LINE_HEIGHT_EM;
+    let (ann_cy, name_cy) = if class.annotation.is_some() {
+        let band_mid = y + g.name_h / 2.0;
+        (band_mid - line_h / 2.0, band_mid + line_h / 2.0)
+    } else {
+        (0.0, y + g.name_h / 2.0)
+    };
+    if let Some(ann) = &class.annotation {
+        let _ = write!(
+            svg,
+            "<text x=\"{cx:.2}\" y=\"{cy:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" \
+             font-family=\"{family}\" font-size=\"{fs}\" font-style=\"italic\" fill=\"{tfill}\"{tfo}>{}</text>",
+            escape(&format!("«{ann}»")),
+            cx = b.cx,
+            cy = ann_cy,
+        );
+    }
     let _ = write!(
         svg,
         "<text x=\"{cx:.2}\" y=\"{cy:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" \
          font-family=\"{family}\" font-size=\"{fs}\" font-weight=\"bold\" fill=\"{tfill}\"{tfo}>{}</text>",
-        escape(&class.name),
+        escape(&class.display_name),
         cx = b.cx,
-        cy = y + g.name_h / 2.0,
+        cy = name_cy,
     );
 
     // Attributes (left-aligned) in the middle band.
-    let line_h = fs * LINE_HEIGHT_EM;
     let text_x = x + opts.node_padding_x;
     let attr_top = div1;
     emit_lines(svg, &class.attributes, text_x, attr_top, line_h, opts, &tfill, &tfo, &family, fs);
@@ -703,12 +1226,13 @@ fn emit_marker(
     match marker {
         RelMarker::Triangle => {
             // Hollow triangle (inheritance / realization): tip + two base corners,
-            // filled white (node background) so it reads as hollow.
+            // filled with the canvas background so it reads as hollow on any theme.
             let _ = write!(
                 svg,
                 "<polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" \
-                 fill=\"rgb(255,255,255)\" stroke=\"{stroke}\"{so} stroke-width=\"{STROKE_W}\"/>",
+                 fill=\"{bg}\" stroke=\"{stroke}\"{so} stroke-width=\"{STROKE_W}\"/>",
                 tip.0, tip.1, b1.0, b1.1, b2.0, b2.1,
+                bg = rgb(opts.background),
             );
         }
         RelMarker::Arrow => {
@@ -727,7 +1251,7 @@ fn emit_marker(
             let fill = if marker == RelMarker::DiamondFilled {
                 stroke.clone()
             } else {
-                "rgb(255,255,255)".to_string()
+                rgb(opts.background)
             };
             let _ = write!(
                 svg,
@@ -749,9 +1273,10 @@ fn emit_label(svg: &mut String, label: &str, cx: f32, cy: f32, opts: &MermaidOpt
     let _ = write!(
         svg,
         "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{bw:.2}\" height=\"{bh:.2}\" \
-         fill=\"rgb(255,255,255)\" fill-opacity=\"0.85\"/>",
+         fill=\"{bg}\" fill-opacity=\"0.85\"/>",
         x = cx - bw / 2.0,
         y = cy - bh / 2.0,
+        bg = rgb(opts.background),
     );
     let (tfill, tfo) = fill_attrs(opts.text_color);
     let family = escape(&opts.font_family);
@@ -763,9 +1288,122 @@ fn emit_label(svg: &mut String, label: &str, cx: f32, cy: f32, opts: &MermaidOpt
     );
 }
 
+/// Note placement: gap between a class box and its attached note, and the
+/// note's inner text padding.
+const NOTE_GAP: f32 = 24.0;
+const NOTE_PAD: f32 = 8.0;
+/// Size of the folded "dog-ear" corner.
+const NOTE_FOLD: f32 = 10.0;
+
+/// Geometry for one positioned note rectangle.
+struct NoteGeom {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    text: String,
+}
+
+/// Position every note. Attached notes sit to the right of their class box,
+/// aligned to the box top; floating notes stack at the top-left. All notes are
+/// laid out so their coordinates stay non-negative and the caller grows the
+/// canvas to include them (no shifting of existing content).
+fn layout_notes(diagram: &ClassDiagram, lay: &Layout, opts: &MermaidOptions) -> Vec<NoteGeom> {
+    let fs = opts.font_size_px;
+    let mut out = Vec::new();
+    let mut float_y = 0.0_f32;
+    for note in &diagram.notes {
+        let (tw, th) = text_size(&note.text, fs);
+        let w = tw + 2.0 * NOTE_PAD + NOTE_FOLD;
+        let h = th + 2.0 * NOTE_PAD;
+        let (x, y) = match &note.for_class {
+            Some(id) => {
+                // Find the attached class box; place the note to its right.
+                let placed = lay
+                    .boxes
+                    .iter()
+                    .find(|b| diagram.classes[b.class_idx].name == *id)
+                    .map(|b| {
+                        let g = &b.geom;
+                        (b.cx + g.w / 2.0 + NOTE_GAP, b.cy - g.h / 2.0)
+                    });
+                placed.unwrap_or_else(|| {
+                    let y = float_y;
+                    float_y += h + NOTE_GAP;
+                    (0.0, y)
+                })
+            }
+            None => {
+                let y = float_y;
+                float_y += h + NOTE_GAP;
+                (0.0, y)
+            }
+        };
+        out.push(NoteGeom { x, y, w, h, text: note.text.clone() });
+    }
+    out
+}
+
+/// Emit a single note: a pale rectangle with a folded top-right corner and the
+/// note text.
+fn emit_note(svg: &mut String, n: &NoteGeom, opts: &MermaidOptions) {
+    let (x, y, w, h) = (n.x, n.y, n.w, n.h);
+    // Pale fill: blend the node fill toward the background a little. Use a
+    // light, semi-distinct note color derived from the theme text color at low
+    // opacity over the background, but keep it deterministic & simple: a fixed
+    // pale yellow-ish tone that reads as a sticky note on any theme.
+    let note_fill = "#fff5ad";
+    let (stroke, so) = stroke_attrs(opts.node_stroke);
+    let f = NOTE_FOLD;
+    // Body outline with the top-right corner folded in.
+    let _ = write!(
+        svg,
+        "<path d=\"M{x:.2},{y:.2} L{xr:.2},{y:.2} L{xrr:.2},{yf:.2} \
+         L{xrr:.2},{yb:.2} L{x:.2},{yb:.2} Z\" \
+         fill=\"{note_fill}\" stroke=\"{stroke}\"{so} stroke-width=\"{STROKE_W}\"/>",
+        xr = x + w - f,
+        xrr = x + w,
+        yf = y + f,
+        yb = y + h,
+    );
+    // The fold triangle.
+    let _ = write!(
+        svg,
+        "<path d=\"M{xr:.2},{y:.2} L{xr:.2},{yf:.2} L{xrr:.2},{yf:.2} Z\" \
+         fill=\"none\" stroke=\"{stroke}\"{so} stroke-width=\"{STROKE_W}\"/>",
+        xr = x + w - f,
+        xrr = x + w,
+        yf = y + f,
+    );
+    // Text, left-aligned with padding, vertically centered.
+    let (tfill, tfo) = fill_attrs(opts.text_color);
+    let family = escape(&opts.font_family);
+    let fs = opts.font_size_px;
+    let _ = write!(
+        svg,
+        "<text x=\"{tx:.2}\" y=\"{ty:.2}\" text-anchor=\"start\" dominant-baseline=\"central\" \
+         font-family=\"{family}\" font-size=\"{fs}\" fill=\"{tfill}\"{tfo}>{}</text>",
+        escape(&n.text),
+        tx = x + NOTE_PAD,
+        ty = y + h / 2.0,
+    );
+}
+
+/// Final canvas size including any notes (notes only ever extend right/down).
+fn canvas_size(diagram: &ClassDiagram, lay: &Layout, opts: &MermaidOptions) -> (f32, f32) {
+    let notes = layout_notes(diagram, lay, opts);
+    let mut w = lay.width;
+    let mut h = lay.height;
+    for n in &notes {
+        w = w.max(n.x + n.w);
+        h = h.max(n.y + n.h);
+    }
+    ((w.ceil() + 1.0).max(1.0), (h.ceil() + 1.0).max(1.0))
+}
+
 fn draw(diagram: &ClassDiagram, lay: &Layout, opts: &MermaidOptions) -> String {
-    let w = (lay.width.ceil() + 1.0).max(1.0);
-    let h = (lay.height.ceil() + 1.0).max(1.0);
+    let notes = layout_notes(diagram, lay, opts);
+    let (w, h) = canvas_size(diagram, lay, opts);
 
     let mut svg = String::new();
     let _ = write!(
@@ -782,6 +1420,10 @@ fn draw(diagram: &ClassDiagram, lay: &Layout, opts: &MermaidOptions) -> String {
     for b in &lay.boxes {
         emit_box(&mut svg, b, &diagram.classes[b.class_idx], opts);
     }
+    // Notes on top of everything.
+    for n in &notes {
+        emit_note(&mut svg, n, opts);
+    }
 
     svg.push_str("</svg>");
     svg
@@ -797,10 +1439,11 @@ pub fn render_class(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
     }
     let lay = layout(&diagram, opts);
     let svg = draw(&diagram, &lay, opts);
+    let (width_px, height_px) = canvas_size(&diagram, &lay, opts);
     Ok(MermaidRender {
         svg,
-        width_px: (lay.width.ceil() + 1.0).max(1.0),
-        height_px: (lay.height.ceil() + 1.0).max(1.0),
+        width_px,
+        height_px,
     })
 }
 
@@ -1048,6 +1691,86 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    // ---- styling directives ----
+
+    fn style_of<'a>(d: &'a ClassDiagram, name: &str) -> &'a ElemStyle {
+        &d.classes.iter().find(|c| c.name == name).expect("class").style
+    }
+
+    #[test]
+    fn classdef_and_class_apply() {
+        let src = "classDiagram\nclass Animal\nclass Dog\nclassDef hot fill:#f00\nclass Animal hot\n";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "Animal").fill, Some([255, 0, 0, 255]));
+        // Dog untouched.
+        assert_eq!(style_of(&d, "Dog").fill, None);
+    }
+
+    #[test]
+    fn classdef_defined_after_class_resolves() {
+        // Two-pass: the `class` assignment references `hot` before its classDef
+        // appears later in the source.
+        let src = "classDiagram\nclass Animal\nclass Animal hot\nclassDef hot fill:#0f0\n";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "Animal").fill, Some([0, 255, 0, 255]));
+    }
+
+    #[test]
+    fn triple_colon_shorthand() {
+        let src = "classDiagram\nAnimal:::hot <|-- Dog\nclassDef hot fill:#f00\n";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "Animal").fill, Some([255, 0, 0, 255]));
+        // Relationship still recorded with the bare name.
+        assert_eq!(d.relations.len(), 1);
+        assert_eq!(d.relations[0].from, "Animal");
+        assert_eq!(d.relations[0].to, "Dog");
+    }
+
+    #[test]
+    fn triple_colon_bare_class() {
+        let src = "classDiagram\nclass Animal\nAnimal:::hot\nclassDef hot fill:#00f\n";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "Animal").fill, Some([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn cssclass_directive() {
+        let src = "classDiagram\nclass Animal\nclassDef hot fill:#f00\ncssClass \"Animal\" hot\n";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "Animal").fill, Some([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn style_directive_direct_and_overrides_class() {
+        let src = "classDiagram\nclass Dog\nstyle Dog fill:#0f0\n";
+        let d = parse(src).unwrap();
+        assert_eq!(style_of(&d, "Dog").fill, Some([0, 255, 0, 255]));
+
+        // Inline `style` wins over `class`.
+        let src2 = "classDiagram\nclass Animal\nclassDef hot fill:#f00\nclass Animal hot\nstyle Animal fill:#00f\n";
+        let d2 = parse(src2).unwrap();
+        assert_eq!(style_of(&d2, "Animal").fill, Some([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn style_override_in_rendered_svg() {
+        // Animal's box rect should carry the override fill color.
+        let src = "classDiagram\nclass Animal\nclass Dog\nclassDef hot fill:#f00\nclass Animal hot\n";
+        let r = render_class(src, &opts()).unwrap();
+        assert!(r.svg.contains(&rgb([255, 0, 0, 255])), "override fill present: {}", r.svg);
+        // Default node fill still appears (Dog uses it).
+        assert!(r.svg.contains(&rgb(opts().node_fill)));
+    }
+
+    #[test]
+    fn unstyled_classes_unchanged() {
+        // No directives → every class style is default.
+        let d = parse(sample()).unwrap();
+        for c in &d.classes {
+            assert_eq!(c.style, ElemStyle::default());
+        }
+    }
+
     #[test]
     fn all_relationship_kinds_render() {
         let src = "classDiagram\n\
@@ -1056,5 +1779,153 @@ mod tests {
         // 8 classes A..H.
         assert_eq!(r.svg.matches("<rect").count(), 8);
         assert!(r.svg.starts_with("<svg"));
+    }
+
+    // ---- generics ----
+
+    #[test]
+    fn split_generic_forms() {
+        assert_eq!(split_generic("List~int~"), ("List".into(), "List<int>".into()));
+        assert_eq!(split_generic("Map~K, V~"), ("Map".into(), "Map<K, V>".into()));
+        assert_eq!(split_generic("Plain"), ("Plain".into(), "Plain".into()));
+    }
+
+    #[test]
+    fn generic_class_id_vs_display() {
+        let d = parse("classDiagram\nclass List~int~\n").unwrap();
+        assert_eq!(d.classes.len(), 1);
+        assert_eq!(d.classes[0].name, "List");
+        assert_eq!(d.classes[0].display_name, "List<int>");
+    }
+
+    #[test]
+    fn generic_class_renders_angle_brackets() {
+        let r = render_class("classDiagram\nclass List~int~\n", &opts()).unwrap();
+        // Display name rendered as List<int> (XML-escaped).
+        assert!(r.svg.contains("List&lt;int&gt;"));
+    }
+
+    #[test]
+    fn generic_relationship_links_base_class() {
+        // `List~int~ --> Item` must link the `List` class id, not `List~int~`.
+        let d = parse("classDiagram\nList~int~ --> Item\n").unwrap();
+        assert_eq!(d.relations.len(), 1);
+        assert_eq!(d.relations[0].from, "List");
+        assert_eq!(d.relations[0].to, "Item");
+        assert!(d.classes.iter().any(|c| c.name == "List"));
+        assert!(d.classes.iter().any(|c| c.name == "Item"));
+    }
+
+    #[test]
+    fn generic_definition_plus_relationship_shares_class() {
+        // A `class List~int~` definition gives the display; the relationship
+        // (matched on the base id `List`) links the same class.
+        let src = "classDiagram\nclass List~int~\nList~int~ --> Item\n";
+        let d = parse(src).unwrap();
+        let list = d.classes.iter().find(|c| c.name == "List").unwrap();
+        assert_eq!(list.display_name, "List<int>");
+        assert_eq!(d.relations[0].from, "List");
+        // Only one List class (definition + relationship endpoint merged).
+        assert_eq!(d.classes.iter().filter(|c| c.name == "List").count(), 1);
+    }
+
+    #[test]
+    fn generic_member_renders_angles() {
+        let d = parse("classDiagram\nclass Box {\n+List~int~ items\n}\n").unwrap();
+        assert_eq!(d.classes[0].attributes[0].text, "+List<int> items");
+        let r = render_class("classDiagram\nclass Box {\n+List~int~ items\n}\n", &opts()).unwrap();
+        assert!(r.svg.contains("+List&lt;int&gt; items"));
+    }
+
+    #[test]
+    fn generic_with_space_is_definition_not_directive() {
+        let d = parse("classDiagram\nclass Map~K, V~\n").unwrap();
+        assert_eq!(d.classes.len(), 1);
+        assert_eq!(d.classes[0].name, "Map");
+        assert_eq!(d.classes[0].display_name, "Map<K, V>");
+    }
+
+    // ---- annotations / stereotypes ----
+
+    #[test]
+    fn annotation_in_body() {
+        let src = "classDiagram\nclass Shape {\n<<interface>>\n+area() float\n}\n";
+        let d = parse(src).unwrap();
+        let shape = d.classes.iter().find(|c| c.name == "Shape").unwrap();
+        assert_eq!(shape.annotation.as_deref(), Some("interface"));
+        // The annotation line is NOT a member.
+        assert_eq!(shape.methods.len(), 1);
+        assert_eq!(shape.attributes.len(), 0);
+    }
+
+    #[test]
+    fn annotation_standalone() {
+        let d = parse("classDiagram\n<<interface>> Shape\n").unwrap();
+        let shape = d.classes.iter().find(|c| c.name == "Shape").unwrap();
+        assert_eq!(shape.annotation.as_deref(), Some("interface"));
+    }
+
+    #[test]
+    fn annotation_renders_guillemets_above_name() {
+        let r = render_class("classDiagram\n<<interface>> Shape\n", &opts()).unwrap();
+        assert!(r.svg.contains("«interface»"));
+        assert!(r.svg.contains("font-style=\"italic\""));
+        assert!(r.svg.contains(">Shape<"));
+    }
+
+    #[test]
+    fn annotation_in_body_renders() {
+        let src = "classDiagram\nclass Shape {\n<<interface>>\n+area() float\n}\n";
+        let r = render_class(src, &opts()).unwrap();
+        assert!(r.svg.contains("«interface»"));
+        assert!(r.svg.contains("+area() float"));
+    }
+
+    // ---- notes ----
+
+    #[test]
+    fn note_for_class_parsed() {
+        let d = parse("classDiagram\nclass Shape\nnote for Shape \"important\"\n").unwrap();
+        assert_eq!(d.notes.len(), 1);
+        assert_eq!(d.notes[0].text, "important");
+        assert_eq!(d.notes[0].for_class.as_deref(), Some("Shape"));
+    }
+
+    #[test]
+    fn note_for_class_renders() {
+        let src = "classDiagram\nclass Shape\nnote for Shape \"important\"\n";
+        let r = render_class(src, &opts()).unwrap();
+        assert!(r.svg.contains(">important<"));
+        // Note body is drawn as a path (folded-corner rectangle).
+        assert!(r.svg.contains("#fff5ad"));
+    }
+
+    #[test]
+    fn floating_note_parsed_and_renders() {
+        let src = "classDiagram\nclass A\nnote \"floating text\"\n";
+        let d = parse(src).unwrap();
+        assert_eq!(d.notes.len(), 1);
+        assert!(d.notes[0].for_class.is_none());
+        let r = render_class(src, &opts()).unwrap();
+        assert!(r.svg.contains(">floating text<"));
+    }
+
+    #[test]
+    fn note_xml_escaped() {
+        let src = "classDiagram\nclass A\nnote for A \"a < b & c\"\n";
+        let r = render_class(src, &opts()).unwrap();
+        assert!(r.svg.contains("a &lt; b &amp; c"));
+    }
+
+    #[test]
+    fn simple_diagrams_unchanged_no_extras() {
+        // A diagram with no generics/annotations/notes: display_name == name,
+        // no annotation, no notes.
+        let d = parse(sample()).unwrap();
+        assert!(d.notes.is_empty());
+        for c in &d.classes {
+            assert_eq!(c.display_name, c.name);
+            assert!(c.annotation.is_none());
+        }
     }
 }

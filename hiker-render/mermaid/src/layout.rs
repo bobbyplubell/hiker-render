@@ -5,7 +5,9 @@
 //! routes into a [`PositionedDiagram`].
 
 use crate::MermaidOptions;
-use crate::model::{FlowChart, PositionedDiagram, PositionedEdge, PositionedNode};
+use crate::model::{
+    FlowChart, PositionedCluster, PositionedDiagram, PositionedEdge, PositionedNode,
+};
 use hiker_graph::layered::RankDir;
 use hiker_graph::{GraphInput, LayeredEngine, LayoutEngine, Vec2};
 
@@ -54,7 +56,35 @@ pub fn layout_flowchart(
         }
     }
 
-    let node_sizes: Vec<Vec2> = sizes.iter().map(|&(w, h)| Vec2::new(w, h)).collect();
+    // Dagre node list = flow nodes (indices `0..n`) then one synthetic container
+    // node per subgraph (indices `n..n+s`). Container nodes get size (0,0) — the
+    // engine computes their bounding rectangle from their members.
+    let n = chart.nodes.len();
+    let s = chart.subgraphs.len();
+    let mut node_sizes: Vec<Vec2> = sizes.iter().map(|&(w, h)| Vec2::new(w, h)).collect();
+    node_sizes.resize(n + s, Vec2::new(0.0, 0.0));
+
+    // `node_parents[i]` = the dagre index of the container holding node `i`, or
+    // `None` for a top-level node. Built only when there are subgraphs (so the
+    // no-subgraph path passes `None` and is byte-for-byte unchanged).
+    let node_parents: Option<Vec<Option<usize>>> = if s == 0 {
+        None
+    } else {
+        let mut parents: Vec<Option<usize>> = vec![None; n + s];
+        // Each flow node → the dagre index of the subgraph that lists it.
+        for (j, sg) in chart.subgraphs.iter().enumerate() {
+            for id in &sg.node_ids {
+                if let Some(&fi) = index_of.get(id.as_str()) {
+                    parents[fi as usize] = Some(n + j);
+                }
+            }
+            // Nested subgraph → its parent container.
+            if let Some(p) = sg.parent {
+                parents[n + j] = Some(n + p);
+            }
+        }
+        Some(parents)
+    };
 
     let engine = LayeredEngine {
         rankdir: match chart.direction {
@@ -70,10 +100,11 @@ pub fn layout_flowchart(
     };
 
     let out = engine.layout(&GraphInput {
-        node_count: chart.nodes.len(),
+        node_count: n + s,
         edges: &edges,
         node_sizes: Some(&node_sizes),
         edge_label_sizes: Some(&label_sizes),
+        node_parents: node_parents.as_deref(),
         directed: true,
     });
 
@@ -148,9 +179,34 @@ pub fn layout_flowchart(
         })
         .collect();
 
+    // Read back each subgraph's container rectangle: center = `positions[n+j]`,
+    // size = `node_sizes[n+j]`. Skip a cluster whose size dagre left at 0 (or
+    // wasn't reported), which keeps the no-subgraph path empty.
+    let clusters: Vec<PositionedCluster> = chart
+        .subgraphs
+        .iter()
+        .enumerate()
+        .filter_map(|(j, sg)| {
+            let k = n + j;
+            let center = out.positions.get(k).copied()?;
+            let size = out.node_sizes.get(k).copied()?;
+            if size.x <= 0.0 || size.y <= 0.0 {
+                return None;
+            }
+            Some(PositionedCluster {
+                title: sg.title.clone(),
+                x: center.x - size.x / 2.0,
+                y: center.y - size.y / 2.0,
+                w: size.x,
+                h: size.y,
+            })
+        })
+        .collect();
+
     PositionedDiagram {
         nodes,
         edges: edges_out,
+        clusters,
         width: out.size.x,
         height: out.size.y,
     }
@@ -195,6 +251,7 @@ mod tests {
             direction: dir,
             nodes: vec![node("a"), node("b"), node("c")],
             edges: vec![edge("a", "b"), edge("b", "c")],
+            subgraphs: Vec::new(),
         }
     }
 
@@ -263,6 +320,7 @@ mod tests {
                 edge("b", "d"),
                 edge("c", "d"),
             ],
+            subgraphs: Vec::new(),
         };
         let sizes = sizes_for(&chart);
         let d = layout_flowchart(&chart, &sizes, &opts());
@@ -292,6 +350,7 @@ mod tests {
             direction: Direction::TopDown,
             nodes: vec![node("a"), node("b")],
             edges: vec![labeled],
+            subgraphs: Vec::new(),
         };
         let sizes = sizes_for(&chart);
         let d = layout_flowchart(&chart, &sizes, &opts());
@@ -331,6 +390,7 @@ mod tests {
             direction: Direction::TopDown,
             nodes: vec![node("a"), node("b")],
             edges: vec![ab, ba],
+            subgraphs: Vec::new(),
         };
         let sizes = sizes_for(&chart);
         let d = layout_flowchart(&chart, &sizes, &opts());
@@ -351,6 +411,7 @@ mod tests {
                 edge("b", "d"),
                 edge("c", "d"),
             ],
+            subgraphs: Vec::new(),
         };
         let sizes = sizes_for(&chart);
         let a = layout_flowchart(&chart, &sizes, &opts());
@@ -369,11 +430,101 @@ mod tests {
     }
 
     #[test]
+    fn edge_style_carried_to_positioned_edge() {
+        use crate::model::ElemStyle;
+        let mut e = edge("a", "b");
+        e.style = ElemStyle {
+            stroke: Some([0, 0, 255, 255]),
+            stroke_width: Some(4.0),
+            ..Default::default()
+        };
+        let chart = FlowChart {
+            direction: Direction::TopDown,
+            nodes: vec![node("a"), node("b")],
+            edges: vec![e],
+            subgraphs: Vec::new(),
+        };
+        let sizes = sizes_for(&chart);
+        let d = layout_flowchart(&chart, &sizes, &opts());
+        assert_eq!(d.edges.len(), 1);
+        assert_eq!(d.edges[0].style.stroke, Some([0, 0, 255, 255]));
+        assert_eq!(d.edges[0].style.stroke_width, Some(4.0));
+    }
+
+    #[test]
+    fn node_style_carried_to_positioned_node() {
+        use crate::model::ElemStyle;
+        let mut n = node("a");
+        n.style = ElemStyle {
+            fill: Some([255, 0, 0, 255]),
+            ..Default::default()
+        };
+        let chart = FlowChart {
+            direction: Direction::TopDown,
+            nodes: vec![n, node("b")],
+            edges: vec![edge("a", "b")],
+            subgraphs: Vec::new(),
+        };
+        let sizes = sizes_for(&chart);
+        let d = layout_flowchart(&chart, &sizes, &opts());
+        assert_eq!(d.nodes[0].style.fill, Some([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn subgraph_cluster_encloses_members() {
+        use crate::model::Subgraph;
+        let chart = FlowChart {
+            direction: Direction::TopDown,
+            nodes: vec![node("a"), node("b"), node("c")],
+            edges: vec![edge("a", "b"), edge("b", "c")],
+            subgraphs: vec![Subgraph {
+                id: "g".to_string(),
+                title: "Group".to_string(),
+                // a and b are inside the subgraph; c is top-level.
+                node_ids: vec!["a".to_string(), "b".to_string()],
+                parent: None,
+            }],
+        };
+        let sizes = sizes_for(&chart);
+        let d = layout_flowchart(&chart, &sizes, &opts());
+
+        assert_eq!(d.nodes.len(), 3);
+        assert_eq!(d.clusters.len(), 1, "one cluster expected");
+        let cl = &d.clusters[0];
+        assert_eq!(cl.title, "Group");
+        assert!(cl.w > 0.0 && cl.h > 0.0);
+
+        // The cluster rect must enclose its members' centers (a, b).
+        let a = &d.nodes[0];
+        let b = &d.nodes[1];
+        let min_cx = a.cx.min(b.cx);
+        let max_cx = a.cx.max(b.cx);
+        let min_cy = a.cy.min(b.cy);
+        let max_cy = a.cy.max(b.cy);
+        assert!(cl.x <= min_cx, "cluster.x {} <= min cx {}", cl.x, min_cx);
+        assert!(cl.x + cl.w >= max_cx, "cluster right encloses max cx");
+        assert!(cl.y <= min_cy, "cluster.y {} <= min cy {}", cl.y, min_cy);
+        assert!(cl.y + cl.h >= max_cy, "cluster bottom encloses max cy");
+    }
+
+    #[test]
+    fn no_subgraph_chart_has_no_clusters() {
+        let chart = chain(Direction::TopDown);
+        let sizes = sizes_for(&chart);
+        let d = layout_flowchart(&chart, &sizes, &opts());
+        assert!(d.clusters.is_empty());
+        // Node centers must be the same as without the cluster machinery (the
+        // no-subgraph path is unchanged): just sanity-check basic ordering.
+        assert!(d.nodes[0].cy < d.nodes[1].cy);
+    }
+
+    #[test]
     fn edge_with_missing_endpoint_skipped() {
         let chart = FlowChart {
             direction: Direction::TopDown,
             nodes: vec![node("a"), node("b")],
             edges: vec![edge("a", "b"), edge("a", "ghost")],
+            subgraphs: Vec::new(),
         };
         let sizes = sizes_for(&chart);
         let d = layout_flowchart(&chart, &sizes, &opts());

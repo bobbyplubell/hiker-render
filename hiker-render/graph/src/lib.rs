@@ -49,6 +49,12 @@ pub struct GraphInput<'a> {
     /// each other) and reports where it placed them via
     /// [`LayoutOutput::edge_label_positions`]. Point engines ignore this.
     pub edge_label_sizes: Option<&'a [Option<Vec2>]>,
+    /// Optional per-node parent index (cluster/subgraph membership): `Some(p)`
+    /// means node `i` is inside container node `p`; `None` = top-level. A node
+    /// that is some other node's parent becomes a **cluster** — the layered
+    /// engine sizes/positions it around its children and reports its rectangle
+    /// via [`LayoutOutput::node_sizes`] + `positions`. Point engines ignore this.
+    pub node_parents: Option<&'a [Option<usize>]>,
     pub directed: bool,
 }
 
@@ -63,6 +69,11 @@ pub struct LayoutOutput {
     /// [`GraphInput::edge_label_sizes`] and were positioned; `None` otherwise.
     /// Empty when the engine doesn't place edge labels.
     pub edge_label_positions: Vec<Option<Vec2>>,
+    /// Final per-node size `(width, height)`, aligned to node index. For leaf
+    /// nodes this echoes the input size; for **cluster** nodes (parents of other
+    /// nodes) it is the engine-computed bounding rectangle. Empty when the engine
+    /// doesn't compute sizes.
+    pub node_sizes: Vec<Vec2>,
     pub size: Vec2,
 }
 
@@ -119,6 +130,7 @@ impl LayoutEngine for ForceEngine {
             positions,
             edge_routes: Vec::new(),
             edge_label_positions: Vec::new(),
+            node_sizes: Vec::new(),
             size,
         }
     }
@@ -162,6 +174,7 @@ impl LayoutEngine for TreeEngine {
             positions,
             edge_routes: Vec::new(),
             edge_label_positions: Vec::new(),
+            node_sizes: Vec::new(),
             size,
         }
     }

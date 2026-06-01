@@ -138,15 +138,55 @@ const SERIES_NEUTRAL: [[u8; 4]; 8] = [
     [190, 190, 190, 255],
 ];
 
+/// Config extracted from a diagram's frontmatter / `%%{init}%%` directive.
+#[derive(Default)]
+pub(crate) struct Config {
+    pub theme: Option<MermaidTheme>,
+    pub look: Option<crate::Look>,
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
+}
+
 /// Strip a leading `---` frontmatter block and any `%%{init: …}%%` directives
-/// from `src`, returning `(cleaned_source, theme_if_specified)`.
+/// from `src`, returning `(cleaned_source, config)`.
 ///
-/// Looks for `theme: <name>` inside the frontmatter and `"theme": "<name>"`
-/// (single or double quotes) inside an init directive. The cleaned source is
-/// what the diagram parsers see (they don't understand frontmatter).
-pub(crate) fn preprocess(src: &str) -> (String, Option<MermaidTheme>) {
-    let mut theme: Option<MermaidTheme> = None;
+/// Extracts `theme`, `look`, `fontFamily`, and `fontSize` from frontmatter
+/// (`key: value`) and from an init directive (`"key": "value"`). The cleaned
+/// source is what the diagram parsers see (they don't understand frontmatter).
+pub(crate) fn preprocess(src: &str) -> (String, Config) {
+    let mut cfg = Config::default();
     let mut body = src;
+
+    let apply = |cfg: &mut Config, key: &str, val: &str| {
+        let val = val.trim().trim_matches(['"', '\'']);
+        match key {
+            "theme" => {
+                if let Some(t) = MermaidTheme::from_name(val) {
+                    cfg.theme = Some(t);
+                }
+            }
+            "look" => {
+                cfg.look = match val.to_ascii_lowercase().as_str() {
+                    "handdrawn" | "hand-drawn" | "rough" | "sketch" => Some(crate::Look::HandDrawn),
+                    "classic" | "default" | "neat" => Some(crate::Look::Classic),
+                    _ => cfg.look,
+                };
+            }
+            "fontFamily" | "fontfamily" => {
+                if !val.is_empty() {
+                    cfg.font_family = Some(val.to_string());
+                }
+            }
+            "fontSize" | "fontsize" => {
+                if let Ok(n) = val.trim_end_matches("px").trim().parse::<f32>() {
+                    if n > 0.0 {
+                        cfg.font_size = Some(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+    };
 
     // Leading YAML frontmatter: `---` … `---`.
     let trimmed = src.trim_start_matches([' ', '\t', '\n', '\r']);
@@ -155,29 +195,25 @@ pub(crate) fn preprocess(src: &str) -> (String, Option<MermaidTheme>) {
         if let Some(end) = after.find("\n---") {
             let block = &after[..end];
             for line in block.lines() {
-                if let Some(rest) = line.trim().strip_prefix("theme:") {
-                    if let Some(t) = MermaidTheme::from_name(rest) {
-                        theme = Some(t);
-                    }
+                let l = line.trim();
+                if let Some((k, v)) = l.split_once(':') {
+                    apply(&mut cfg, k.trim(), v);
                 }
             }
-            // Body is everything after the closing `---` line.
             let rest = &after[end + 4..];
             let rest = rest.strip_prefix(|c| c == '\n' || c == '\r').unwrap_or(rest);
             body = rest;
         }
     }
 
-    // `%%{init: {... "theme": "dark" ...}}%%` anywhere — extract the theme, then
-    // strip the directive lines (the diagram parsers treat `%%`-lines as
-    // comments, but we drop them cleanly so the header detection isn't fooled).
+    // `%%{init: { … }}%%` anywhere — extract config keys, then strip the line.
     let mut out_lines: Vec<&str> = Vec::new();
     for line in body.lines() {
         let t = line.trim_start();
         if t.starts_with("%%{") && t.contains("init") {
-            if let Some(name) = extract_init_theme(t) {
-                if let Some(th) = MermaidTheme::from_name(&name) {
-                    theme = Some(th);
+            for key in ["theme", "look", "fontFamily", "fontSize"] {
+                if let Some(v) = extract_init_value(t, key) {
+                    apply(&mut cfg, key, &v);
                 }
             }
             continue; // drop the directive line
@@ -185,17 +221,16 @@ pub(crate) fn preprocess(src: &str) -> (String, Option<MermaidTheme>) {
         out_lines.push(line);
     }
 
-    (out_lines.join("\n"), theme)
+    (out_lines.join("\n"), cfg)
 }
 
-/// Pull the `theme` value out of an `%%{init: { ... "theme": "x" ... }}%%` line.
-fn extract_init_theme(line: &str) -> Option<String> {
-    let idx = line.find("theme")?;
-    let after = &line[idx + 5..];
+/// Pull a `"<key>": "<value>"` value out of an `%%{init: { … }}%%` line.
+fn extract_init_value(line: &str, key: &str) -> Option<String> {
+    let idx = line.find(key)?;
+    let after = &line[idx + key.len()..];
     // skip optional closing quote of the key, `:`, spaces, opening quote
     let after = after.trim_start_matches(['"', '\'', ' ', ':']);
-    // value runs until the next quote / comma / brace / space
-    let end = after.find(['"', '\'', ',', '}', ' ']).unwrap_or(after.len());
+    let end = after.find(['"', '\'', ',', '}']).unwrap_or(after.len());
     let val = after[..end].trim();
     if val.is_empty() { None } else { Some(val.to_string()) }
 }
@@ -214,22 +249,22 @@ mod tests {
 
     #[test]
     fn frontmatter_theme_and_strip() {
-        let (body, theme) = preprocess("---\nconfig:\n  theme: dark\n---\ngraph TD\n A-->B");
-        assert_eq!(theme, Some(MermaidTheme::Dark));
+        let (body, cfg) = preprocess("---\nconfig:\n  theme: dark\n---\ngraph TD\n A-->B");
+        assert_eq!(cfg.theme, Some(MermaidTheme::Dark));
         assert!(body.starts_with("graph TD"), "frontmatter stripped: {body:?}");
     }
 
     #[test]
     fn init_directive_theme() {
-        let (body, theme) = preprocess("%%{init: {'theme': 'forest'}}%%\npie\n \"A\" : 1");
-        assert_eq!(theme, Some(MermaidTheme::Forest));
+        let (body, cfg) = preprocess("%%{init: {'theme': 'forest'}}%%\npie\n \"A\" : 1");
+        assert_eq!(cfg.theme, Some(MermaidTheme::Forest));
         assert!(body.trim_start().starts_with("pie"));
     }
 
     #[test]
     fn no_directive() {
-        let (body, theme) = preprocess("graph TD\n A-->B");
-        assert_eq!(theme, None);
+        let (body, cfg) = preprocess("graph TD\n A-->B");
+        assert_eq!(cfg.theme, None);
         assert_eq!(body, "graph TD\n A-->B");
     }
 }

@@ -30,10 +30,14 @@
 //! it. `merge X` emits a commit on the current lane whose parents are
 //! `{current head, branch X's head}` and curves to branch X.
 //!
-//! Skipped / noted: `cherry-pick` (parsed-and-ignored, recorded as a note in the
-//! model but drawn as a normal commit), `REVERSE`/`HIGHLIGHT` type styling beyond
-//! a simple shape/outline hint, custom themes, commit `order:` semantics beyond
-//! lane assignment by first appearance.
+//! `cherry-pick id: "X"` (optionally `tag: "Y"`) emits a commit on the current
+//! lane flagged as a cherry-pick carrying source id `X`; it is drawn with a
+//! distinct marker (an outlined circle with a cross through it) and a
+//! `cherry-pick:X` (or the given tag) label.
+//!
+//! Skipped / noted: `REVERSE`/`HIGHLIGHT` type styling beyond a simple
+//! shape/outline hint, custom themes, commit `order:` semantics beyond lane
+//! assignment by first appearance.
 //!
 //! See `references/mermaid/packages/mermaid/src/diagrams/git/` for the upstream.
 
@@ -83,6 +87,8 @@ struct Commit {
     parents: Vec<usize>,
     /// True if this is a merge commit (parents from two branches).
     is_merge: bool,
+    /// If set, this is a cherry-pick commit carrying the cherry-picked source id.
+    cherry_pick: Option<String>,
 }
 
 /// A parsed gitGraph: direction, lane→branch-name order, and the commit list.
@@ -193,10 +199,8 @@ fn parse_gitgraph(src: &str) -> Result<GitGraph, String> {
             "branch" => parse_branch(args, &mut st)?,
             "checkout" | "switch" => parse_checkout(args, &mut st)?,
             "cherry-pick" => {
-                // We parse but don't fully model cherry-pick: draw it as a normal
-                // commit on the current branch and record a note.
                 st.notes.push(format!("cherry-pick: {args}"));
-                parse_commit("", &mut st);
+                parse_cherry_pick(args, &mut st);
             }
             other => return Err(format!("unknown gitGraph command: {other:?}")),
         }
@@ -240,6 +244,40 @@ fn parse_commit(args: &str, st: &mut ParseState) {
         ctype: attrs.ctype.unwrap_or(CommitType::Normal),
         parents,
         is_merge: false,
+        cherry_pick: None,
+    });
+    st.seq += 1;
+    st.head_of.insert(st.current.clone(), Some(idx));
+}
+
+/// Append a cherry-pick commit on the current branch. Syntax:
+/// `cherry-pick id: "X"` (the picked source id, required by mermaid) with an
+/// optional `tag: "Y"`. The commit sits on the current lane at the next seq with
+/// its parent edge as a normal commit, but is flagged as a cherry-pick carrying
+/// the source id so the renderer can draw a distinct marker + label.
+fn parse_cherry_pick(args: &str, st: &mut ParseState) {
+    let attrs = parse_attrs(args);
+    let lane = *st.lane_of.get(&st.current).expect("current branch has a lane");
+    let parent = st.head_of.get(&st.current).copied().flatten();
+    let parents = parent.into_iter().collect::<Vec<_>>();
+
+    // The picked source id (from `id:`). Fall back to an auto id if missing.
+    let picked = attrs.id.clone().unwrap_or_default();
+    let id = attrs.id.unwrap_or_else(|| {
+        let n = st.auto_id;
+        st.auto_id += 1;
+        format!("cp{n}")
+    });
+    let idx = st.commits.len();
+    st.commits.push(Commit {
+        seq: st.seq,
+        lane,
+        id,
+        tag: attrs.tag,
+        ctype: CommitType::Normal,
+        parents,
+        is_merge: false,
+        cherry_pick: Some(picked),
     });
     st.seq += 1;
     st.head_of.insert(st.current.clone(), Some(idx));
@@ -320,6 +358,7 @@ fn parse_merge(args: &str, st: &mut ParseState) -> Result<(), String> {
         ctype: CommitType::Normal,
         parents,
         is_merge: true,
+        cherry_pick: None,
     });
     st.seq += 1;
     st.head_of.insert(st.current.clone(), Some(idx));
@@ -558,6 +597,45 @@ pub fn render_gitgraph(src: &str, opts: &MermaidOptions) -> Result<MermaidRender
         let [r, gg, bb] = lane_color(c.lane);
         let fill = rgb([r, gg, bb, 255]);
 
+        if let Some(picked) = &c.cherry_pick {
+            // Cherry-pick marker: an outlined (white-filled) circle in the branch
+            // color with a small ✗/cross of two crossing line segments through it,
+            // setting it apart from a normal filled commit dot.
+            let _ = write!(
+                svg,
+                "<circle cx=\"{cx:.2}\" cy=\"{cy:.2}\" r=\"{COMMIT_R:.2}\" fill=\"white\" \
+                 stroke=\"{fill}\" stroke-width=\"2\"/>",
+            );
+            let d = COMMIT_R * 0.55;
+            let _ = write!(
+                svg,
+                "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{fill}\" stroke-width=\"2\"/>\
+                 <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{fill}\" stroke-width=\"2\"/>",
+                cx - d, cy - d, cx + d, cy + d,
+                cx - d, cy + d, cx + d, cy - d,
+            );
+
+            // id label below (LR) / beside the commit.
+            let (lx, ly, anchor) = match g.dir {
+                Dir::Lr => (cx, cy + label_dy, "middle"),
+                Dir::Tb | Dir::Bt => (cx + COMMIT_R + 4.0, cy, "start"),
+            };
+            emit_text(&mut svg, &c.id, lx, ly, fs * 0.85, opts, anchor);
+
+            // Cherry-pick label (above the commit): the given tag, or
+            // `cherry-pick:<picked-id>`.
+            let label = match &c.tag {
+                Some(t) => t.clone(),
+                None => format!("cherry-pick:{picked}"),
+            };
+            let (tx, ty, ta) = match g.dir {
+                Dir::Lr => (cx, cy - COMMIT_R - fs * 0.5, "middle"),
+                Dir::Tb | Dir::Bt => (cx - COMMIT_R - 4.0, cy, "end"),
+            };
+            emit_tag(&mut svg, &label, tx, ty, fs * 0.8, opts, ta);
+            continue;
+        }
+
         match c.ctype {
             CommitType::Highlight => {
                 // Larger, outlined square-ish marker (we use a bigger circle with
@@ -791,6 +869,68 @@ mod tests {
         .expect("parse");
         assert_eq!(g.commits.len(), 2);
         assert!(g.notes.iter().any(|n| n.contains("cherry-pick")));
+    }
+
+    #[test]
+    fn cherry_pick_flagged_with_source_id() {
+        let g = parse_gitgraph(
+            "gitGraph\ncommit\ncherry-pick id: \"abc\"\n",
+        )
+        .expect("parse");
+        assert_eq!(g.commits.len(), 2);
+        let cp = &g.commits[1];
+        assert_eq!(cp.cherry_pick.as_deref(), Some("abc"), "carries source id");
+        assert!(!cp.is_merge);
+        assert_eq!(cp.parents, vec![0], "parent edge is the prior commit");
+        // A normal commit is not flagged.
+        assert!(g.commits[0].cherry_pick.is_none());
+    }
+
+    #[test]
+    fn cherry_pick_with_tag() {
+        let g = parse_gitgraph(
+            "gitGraph\ncommit\ncherry-pick id: \"abc\" tag: \"v9\"\n",
+        )
+        .expect("parse");
+        let cp = &g.commits[1];
+        assert_eq!(cp.cherry_pick.as_deref(), Some("abc"));
+        assert_eq!(cp.tag.as_deref(), Some("v9"));
+    }
+
+    #[test]
+    fn render_cherry_pick_marker_distinct() {
+        let normal = render_gitgraph("gitGraph\ncommit\ncommit\n", &MermaidOptions::default())
+            .expect("render normal");
+        let cp = render_gitgraph(
+            "gitGraph\ncommit\ncherry-pick id: \"abc\"\n",
+            &MermaidOptions::default(),
+        )
+        .expect("render cherry-pick");
+
+        // The cherry-pick marker draws crossing line segments + an outlined
+        // circle + a `cherry-pick:abc` label, none of which a plain two-commit
+        // graph produces.
+        assert!(cp.svg.contains("cherry-pick:abc"), "picked-id label present");
+        // The marker adds extra <line> segments (the cross) vs. the normal graph,
+        // which on a single lane has no cross-lane connectors.
+        assert!(
+            cp.svg.matches("<line").count() > normal.svg.matches("<line").count(),
+            "cherry-pick adds crossing line segments"
+        );
+        // The cherry-pick circle is outlined (white fill + colored stroke),
+        // unlike a normal filled commit dot.
+        assert!(cp.svg.contains("fill=\"white\""), "outlined circle");
+    }
+
+    #[test]
+    fn render_cherry_pick_shows_tag_label() {
+        let r = render_gitgraph(
+            "gitGraph\ncommit\ncherry-pick id: \"abc\" tag: \"v9\"\n",
+            &MermaidOptions::default(),
+        )
+        .expect("render");
+        assert!(r.svg.contains(">v9<"), "shows the given tag");
+        assert!(!r.svg.contains("cherry-pick:abc"), "tag overrides default label");
     }
 
     #[test]

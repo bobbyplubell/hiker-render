@@ -167,9 +167,14 @@ const PALETTE: [[u8; 4]; 8] = [
     [236, 255, 248, 255],
 ];
 
-/// Pick a palette color for a slot index.
-fn palette(i: usize) -> [u8; 4] {
-    PALETTE[i % PALETTE.len()]
+/// Pick a palette color (RGBA) for a slot index. Prefers the active theme's
+/// `series_palette` when set, falling back to the local [`PALETTE`].
+fn palette_color(opts: &MermaidOptions, i: usize) -> [u8; 4] {
+    if !opts.series_palette.is_empty() {
+        opts.series_palette[i % opts.series_palette.len()]
+    } else {
+        PALETTE[i % PALETTE.len()]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +256,7 @@ pub fn render_timeline(src: &str, opts: &MermaidOptions) -> Result<MermaidRender
             if let Some(s) = sec {
                 let x0 = col_x(i);
                 let x1 = col_x(j - 1) + COL_W;
-                let color = palette(s);
+                let color = palette_color(opts, s);
                 let _ = write!(
                     svg,
                     "<rect x=\"{x0:.2}\" y=\"{band_top:.2}\" width=\"{bw:.2}\" \
@@ -297,8 +302,8 @@ pub fn render_timeline(src: &str, opts: &MermaidOptions) -> Result<MermaidRender
         let x = col_x(i);
         // Color: by section if any, else cycle by period index.
         let color = match p.section {
-            Some(s) => palette(s),
-            None => palette(i),
+            Some(s) => palette_color(opts, s),
+            None => palette_color(opts, i),
         };
 
         // Period box (on the axis).

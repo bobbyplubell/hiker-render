@@ -32,9 +32,13 @@
 //!
 //! **Boundaries**: `System_Boundary(id, "label") { … }`,
 //! `Enterprise_Boundary(...)`, `Container_Boundary(...)`, and bare
-//! `Boundary(...)` — these are **flattened** for v1: the `{ … }` grouping is
-//! parsed but ignored, while the inner elements/relationships are still parsed
-//! as if at top level. Drawing the boundary rectangle is not done.
+//! `Boundary(...)`. Each becomes a dagre cluster (container node) enclosing the
+//! elements declared inside its `{ … }` block; nesting is supported. After
+//! layout the boundary's bounding rectangle is drawn as a dashed, faintly
+//! filled rectangle with a `«System»` / `«Enterprise»` / `«Container»` type
+//! label and the boundary name at the top-left, drawn behind the element boxes
+//! (outermost boundaries first). Inner elements/relationships are still parsed
+//! and laid out as usual.
 //!
 //! **Skipped** (noted): `UpdateElementStyle`, `UpdateRelStyle`,
 //! `UpdateLayoutConfig`, tags, sprites/icons, `RelIndex`, and deployment-node
@@ -47,7 +51,7 @@ use std::fmt::Write as _;
 use hiker_graph::layered::RankDir;
 use hiker_graph::{GraphInput, LayeredEngine, LayoutEngine, Vec2};
 
-use crate::svgutil::{edge_label_anchor, escape, opacity_attr, rgb, text_size};
+use crate::svgutil::{edge_label_anchor, escape, opacity_attr, rgb};
 use crate::{MermaidError, MermaidOptions, MermaidRender};
 
 /// The broad category of a C4 element, which drives the type line and fill.
@@ -102,11 +106,50 @@ struct Relationship {
     tech: String,
 }
 
+/// The category of a boundary, which drives its `«…»` type label and the
+/// default when the optional `type` arg is omitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundaryKind {
+    System,
+    Enterprise,
+    Container,
+    /// Bare `Boundary(...)` — generic.
+    Generic,
+}
+
+impl BoundaryKind {
+    /// The `«…»` type label shown at the boundary's top-left.
+    fn type_label(self) -> &'static str {
+        match self {
+            BoundaryKind::System => "«System»",
+            BoundaryKind::Enterprise => "«Enterprise»",
+            BoundaryKind::Container => "«Container»",
+            BoundaryKind::Generic => "«Boundary»",
+        }
+    }
+}
+
+/// A parsed boundary block (becomes one dagre container node and one drawn
+/// dashed rectangle).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Boundary {
+    /// The id (first arg).
+    id: String,
+    /// The display name (defaults to the id when absent).
+    label: String,
+    kind: BoundaryKind,
+    /// Index into `C4Diagram::boundaries` of the enclosing boundary, if nested.
+    parent: Option<usize>,
+    /// Ids of elements declared directly inside this boundary's `{ … }`.
+    member_elems: Vec<String>,
+}
+
 /// A parsed C4 diagram.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct C4Diagram {
     elements: Vec<Element>,
     relationships: Vec<Relationship>,
+    boundaries: Vec<Boundary>,
 }
 
 /// The set of accepted header keywords.
@@ -240,6 +283,9 @@ fn parse(src: &str) -> Result<C4Diagram, String> {
     let mut diag = C4Diagram::default();
     let mut seen_ids: HashMap<String, ()> = HashMap::new();
     let mut pending_header = true;
+    // Stack of currently-open boundary indices (into `diag.boundaries`). The top
+    // is the boundary that newly-declared elements / boundaries belong to.
+    let mut boundary_stack: Vec<usize> = Vec::new();
 
     for raw in src.lines() {
         // Strip `%%` comments and surrounding whitespace.
@@ -257,20 +303,33 @@ fn parse(src: &str) -> Result<C4Diagram, String> {
             continue;
         }
 
-        // Boundary close brace(s): flattened, so just skip.
-        if line == "}" || line.starts_with('}') {
+        // Boundary close brace(s): pop the innermost open boundary. A line may be
+        // a bare `}` (possibly several) — pop one per `}`.
+        if line.chars().all(|c| c == '}') {
+            for _ in 0..line.chars().count() {
+                boundary_stack.pop();
+            }
             continue;
         }
 
-        // Boundary opener: `<kind>_Boundary(id, "label") {` — flatten: parse the
-        // call but ignore the grouping. We strip a trailing `{` then fall
-        // through; boundary keywords aren't elements/rels so they're ignored.
+        // Boundary opener: `<kind>_Boundary(id, "label") {`. We strip a trailing
+        // `{` and remember that an opener introduced a block.
+        let opens_block = line.ends_with('{');
         let line_no_brace = line.strip_suffix('{').map(str::trim_end).unwrap_or(line);
 
         if let Some((kw, args_str)) = split_call(line_no_brace) {
-            // Boundary? flatten (ignore), already handled the inner block by
-            // virtue of parsing subsequent lines at top level.
-            if is_boundary_keyword(kw) {
+            // Boundary opener: create a boundary node, link it to its parent (the
+            // current top of the stack), and push it so inner elements/boundaries
+            // attach to it.
+            if let Some(kind) = boundary_keyword(kw) {
+                let args = split_args(args_str);
+                if let Some(b) = build_boundary(kind, boundary_stack.last().copied(), &args) {
+                    let idx = diag.boundaries.len();
+                    diag.boundaries.push(b);
+                    if opens_block {
+                        boundary_stack.push(idx);
+                    }
+                }
                 continue;
             }
 
@@ -278,6 +337,10 @@ fn parse(src: &str) -> Result<C4Diagram, String> {
                 let args = split_args(args_str);
                 if let Some(elem) = build_element(kind, external, &args) {
                     if seen_ids.insert(elem.id.clone(), ()).is_none() {
+                        // Register membership in the enclosing boundary, if any.
+                        if let Some(&bi) = boundary_stack.last() {
+                            diag.boundaries[bi].member_elems.push(elem.id.clone());
+                        }
                         diag.elements.push(elem);
                     }
                 }
@@ -314,12 +377,33 @@ fn parse(src: &str) -> Result<C4Diagram, String> {
     Ok(diag)
 }
 
-/// Whether `kw` names a boundary opener (flattened in v1).
-fn is_boundary_keyword(kw: &str) -> bool {
-    matches!(
-        kw,
-        "System_Boundary" | "Enterprise_Boundary" | "Container_Boundary" | "Boundary"
-    )
+/// Map a boundary keyword to its [`BoundaryKind`], if it is one.
+fn boundary_keyword(kw: &str) -> Option<BoundaryKind> {
+    Some(match kw {
+        "System_Boundary" => BoundaryKind::System,
+        "Enterprise_Boundary" => BoundaryKind::Enterprise,
+        "Container_Boundary" => BoundaryKind::Container,
+        "Boundary" => BoundaryKind::Generic,
+        _ => return None,
+    })
+}
+
+/// Build a [`Boundary`] from a keyword's kind, its parent (the enclosing open
+/// boundary) and its split args: `id, "label"`. `None` if there is no id.
+fn build_boundary(kind: BoundaryKind, parent: Option<usize>, args: &[String]) -> Option<Boundary> {
+    let id = args.first().map(|s| s.trim().to_string())?;
+    if id.is_empty() {
+        return None;
+    }
+    let label = args.get(1).cloned().unwrap_or_default();
+    let label = if label.is_empty() { id.clone() } else { label };
+    Some(Boundary {
+        id,
+        label,
+        kind,
+        parent,
+        member_elems: Vec::new(),
+    })
 }
 
 /// Build an [`Element`] from a keyword's kind and its split args. The first arg
@@ -368,6 +452,11 @@ fn build_relationship(args: &[String]) -> Option<Relationship> {
         tech,
     })
 }
+
+/// Boundary rectangle stroke (dashed, dark grey) and a faint themed fill.
+const BOUNDARY_STROKE: [u8; 4] = [68, 68, 68, 255];
+/// Boundary label / type text color.
+const BOUNDARY_TEXT: [u8; 4] = [68, 68, 68, 255];
 
 /// Vertical padding inside a box for the head/circle of a person, px.
 const PERSON_HEAD_R: f32 = 9.0;
@@ -441,7 +530,7 @@ pub fn render_c4(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
             let lines = element_lines(e);
             let mut max_w = 0.0_f32;
             for (txt, _) in &lines {
-                let (w, _) = text_size(txt, fs);
+                let (w, _) = crate::label::measure(txt, fs);
                 max_w = max_w.max(w);
             }
             let w = max_w + 2.0 * opts.node_padding_x;
@@ -470,13 +559,42 @@ pub fn render_c4(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
             label_sizes.push(if text.is_empty() {
                 None
             } else {
-                let (w, h) = text_size(&text, fs);
+                let (w, h) = crate::label::measure(&text, fs);
                 Some(Vec2::new(w + 10.0, h + 6.0))
             });
         }
     }
 
-    let node_sizes: Vec<Vec2> = sizes.iter().map(|&(w, h)| Vec2::new(w, h)).collect();
+    // Dagre node list = elements (indices `0..n`) then one synthetic container
+    // node per boundary (indices `n..n+b`). Container nodes get size (0,0) — the
+    // engine computes their bounding rectangle from their members.
+    let n = diag.elements.len();
+    let b = diag.boundaries.len();
+    let mut node_sizes: Vec<Vec2> = sizes.iter().map(|&(w, h)| Vec2::new(w, h)).collect();
+    node_sizes.resize(n + b, Vec2::ZERO);
+
+    // `node_parents[i]` = the dagre index of the boundary container holding node
+    // `i`, or `None` for a top-level node. Built only when there are boundaries
+    // (so the no-boundary path passes `None` and is byte-for-byte unchanged).
+    let node_parents: Option<Vec<Option<usize>>> = if b == 0 {
+        None
+    } else {
+        let mut parents: Vec<Option<usize>> = vec![None; n + b];
+        for (j, bd) in diag.boundaries.iter().enumerate() {
+            // Each member element → this boundary's container index.
+            for id in &bd.member_elems {
+                if let Some(&fi) = index_of.get(id.as_str()) {
+                    parents[fi as usize] = Some(n + j);
+                }
+            }
+            // Nested boundary → its parent boundary's container index.
+            if let Some(p) = bd.parent {
+                parents[n + j] = Some(n + p);
+            }
+        }
+        Some(parents)
+    };
+
     let engine = LayeredEngine {
         rankdir: RankDir::Tb,
         ranksep: opts.rank_sep,
@@ -485,10 +603,11 @@ pub fn render_c4(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
         default_node_size: Vec2::new(120.0, 60.0),
     };
     let out = engine.layout(&GraphInput {
-        node_count: diag.elements.len(),
+        node_count: n + b,
         edges: &edges,
         node_sizes: Some(&node_sizes),
         edge_label_sizes: Some(&label_sizes),
+        node_parents: node_parents.as_deref(),
         directed: true,
     });
 
@@ -501,6 +620,25 @@ pub fn render_c4(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
          viewBox=\"0 0 {width} {height}\">"
     );
+
+    // Boundary rectangles first — behind relationships and element boxes. Read
+    // back each boundary's rect (center from `out.positions`, size from
+    // `out.node_sizes`) and draw outermost-first (by nesting depth) so a nested
+    // boundary's rect paints over its enclosing parent.
+    let mut bidx: Vec<usize> = (0..diag.boundaries.len()).collect();
+    bidx.sort_by_key(|&j| boundary_depth(&diag.boundaries, j));
+    for &j in &bidx {
+        let k = n + j;
+        let center = match out.positions.get(k).copied() {
+            Some(c) => c,
+            None => continue,
+        };
+        let size = out.node_sizes.get(k).copied().unwrap_or(Vec2::ZERO);
+        if size.x <= 0.0 || size.y <= 0.0 {
+            continue;
+        }
+        emit_boundary(&mut svg, &diag.boundaries[j], center, size, fs, opts);
+    }
 
     // Group relationships by unordered node pair so parallel / bidirectional
     // relationships spread their labels apart.
@@ -607,11 +745,23 @@ fn emit_relationship(
             let _ = write!(
                 svg,
                 "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{bw:.2}\" height=\"{bh:.2}\" \
-                 fill=\"rgb(255,255,255)\" fill-opacity=\"0.85\"/>",
+                 fill=\"{bg}\" fill-opacity=\"0.85\"/>",
                 x = cx - bw / 2.0,
                 y = cy - bh / 2.0,
+                bg = rgb(opts.background),
             );
-            emit_text(svg, &label, cx, cy, opts, opts.text_color, None, None);
+            // Relationship label is a single centered string: route it through
+            // the rich-label renderer for markdown/math support.
+            crate::label::emit(
+                svg,
+                &label,
+                cx,
+                cy,
+                crate::label::Anchor::Middle,
+                opts.font_size_px,
+                opts.text_color,
+                &opts.font_family,
+            );
         }
     }
 }
@@ -659,6 +809,81 @@ fn unit(a: (f32, f32), b: (f32, f32)) -> Option<(f32, f32)> {
     } else {
         Some((dx / len, dy / len))
     }
+}
+
+/// The nesting depth of boundary `j` (0 = top-level), following `parent` links.
+/// Used to order drawing outermost-first.
+fn boundary_depth(boundaries: &[Boundary], j: usize) -> usize {
+    let mut depth = 0;
+    let mut cur = boundaries[j].parent;
+    while let Some(p) = cur {
+        depth += 1;
+        cur = boundaries[p].parent;
+    }
+    depth
+}
+
+/// One boundary: a dashed rounded rectangle with a faint themed fill, plus the
+/// `«Type»` line and the boundary name stacked at the top-left.
+fn emit_boundary(
+    svg: &mut String,
+    boundary: &Boundary,
+    center: Vec2,
+    size: Vec2,
+    fs: f32,
+    opts: &MermaidOptions,
+) {
+    let x = center.x - size.x / 2.0;
+    let y = center.y - size.y / 2.0;
+
+    // Dashed rounded rectangle, faint themed fill (background nudged so it reads
+    // as a subtle tint without obscuring members).
+    let _ = write!(
+        svg,
+        "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" rx=\"2.5\" ry=\"2.5\" \
+         fill=\"{fill}\" fill-opacity=\"0.06\" stroke=\"{stroke}\"{so} stroke-width=\"1\" \
+         stroke-dasharray=\"7,7\"/>",
+        w = size.x,
+        h = size.y,
+        fill = rgb(opts.node_fill),
+        stroke = rgb(BOUNDARY_STROKE),
+        so = opacity_attr("stroke-opacity", BOUNDARY_STROKE),
+    );
+
+    // Type line then name, top-left, just inside the rect. Left-anchored.
+    let pad = 6.0_f32;
+    let tx = x + pad;
+    let mut ty = y + pad + fs * 0.5;
+    emit_boundary_text(svg, boundary.kind.type_label(), tx, ty, fs, opts, None);
+    ty += fs * LINE_H_EM;
+    emit_boundary_text(svg, &boundary.label, tx, ty, fs, opts, Some("bold"));
+}
+
+/// A left-anchored single-line `<text>` for boundary labels.
+fn emit_boundary_text(
+    svg: &mut String,
+    label: &str,
+    x: f32,
+    y: f32,
+    fs: f32,
+    opts: &MermaidOptions,
+    font_weight: Option<&str>,
+) {
+    if label.is_empty() {
+        return;
+    }
+    let weight = font_weight
+        .map(|w| format!(" font-weight=\"{w}\""))
+        .unwrap_or_default();
+    let _ = write!(
+        svg,
+        "<text x=\"{x:.2}\" y=\"{y:.2}\" text-anchor=\"start\" dominant-baseline=\"central\" \
+         font-family=\"{family}\" font-size=\"{fs}\"{weight} fill=\"{fill}\"{fo}>{txt}</text>",
+        family = escape(&opts.font_family),
+        fill = rgb(BOUNDARY_TEXT),
+        fo = opacity_attr("fill-opacity", BOUNDARY_TEXT),
+        txt = escape(label),
+    );
 }
 
 /// One element box: optional person head circle, then the stacked centered
@@ -716,10 +941,34 @@ fn emit_element(
     let block_h = lines.len() as f32 * line_h;
     let mut ty = text_area_top + (text_area_h - block_h) / 2.0 + line_h * 0.5;
     for (txt, bold) in &lines {
-        let weight = if *bold { Some("bold") } else { None };
-        emit_text(svg, txt, cx, ty, opts, text_color, None, weight);
+        // The bold name line is a single centered string: route it through the
+        // rich-label renderer so it supports markdown/math. Plain names keep the
+        // bold `<text>` (label::emit has no default-bold, so it would otherwise
+        // drop the weight); rich names render their own emphasis/math.
+        if *bold && has_rich_markup(txt) {
+            crate::label::emit(
+                svg,
+                txt,
+                cx,
+                ty,
+                crate::label::Anchor::Middle,
+                opts.font_size_px,
+                text_color,
+                &opts.font_family,
+            );
+        } else {
+            let weight = if *bold { Some("bold") } else { None };
+            emit_text(svg, txt, cx, ty, opts, text_color, None, weight);
+        }
         ty += line_h;
     }
+}
+
+/// Cheap check for any rich-label marker (markdown emphasis, inline math, or an
+/// explicit `<br>`); mirrors `crate::label`'s richness test so plain labels stay
+/// on the byte-identical `<text>` path.
+fn has_rich_markup(s: &str) -> bool {
+    s.contains('*') || s.contains('_') || s.contains('$') || s.contains("<br")
 }
 
 /// A centered single-line `<text>` with optional `font-style` / `font-weight`.
@@ -886,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_inner_elements_parsed_flattened() {
+    fn boundary_inner_elements_parsed_and_grouped() {
         let src = "C4Context\n\
             System_Boundary(b1, \"Boundary\") {\n\
             Person(u, \"User\")\n\
@@ -894,11 +1143,126 @@ mod tests {
             }\n\
             Rel(u, s, \"uses\")";
         let d = parse(src).unwrap();
-        // Boundary grouping ignored, but inner elements present.
+        // Inner elements present and still parsed.
         assert_eq!(d.elements.len(), 2);
         assert_eq!(d.elements[0].id, "u");
         assert_eq!(d.elements[1].id, "s");
         assert_eq!(d.relationships.len(), 1);
+        // The boundary is captured with its two members.
+        assert_eq!(d.boundaries.len(), 1);
+        let b = &d.boundaries[0];
+        assert_eq!(b.id, "b1");
+        assert_eq!(b.label, "Boundary");
+        assert_eq!(b.kind, BoundaryKind::System);
+        assert_eq!(b.parent, None);
+        assert_eq!(b.member_elems, vec!["u".to_string(), "s".to_string()]);
+    }
+
+    #[test]
+    fn boundary_members_from_spec_example() {
+        let src = "C4Container\n\
+            System_Boundary(b1, \"My System\") {\n\
+            Container(c1,\"Web\",\"\",\"\")\n\
+            Container(c2,\"DB\",\"\",\"\")\n\
+            }";
+        let d = parse(src).unwrap();
+        assert_eq!(d.boundaries.len(), 1);
+        assert_eq!(d.boundaries[0].id, "b1");
+        assert_eq!(d.boundaries[0].label, "My System");
+        assert_eq!(
+            d.boundaries[0].member_elems,
+            vec!["c1".to_string(), "c2".to_string()]
+        );
+        assert_eq!(d.elements.len(), 2);
+    }
+
+    #[test]
+    fn nested_boundaries_parsed() {
+        let src = "C4Container\n\
+            Enterprise_Boundary(e1, \"Ent\") {\n\
+            System_Boundary(s1, \"Sys\") {\n\
+            Container(c1, \"Web\")\n\
+            }\n\
+            Container(c2, \"Edge\")\n\
+            }";
+        let d = parse(src).unwrap();
+        assert_eq!(d.boundaries.len(), 2);
+        let e = &d.boundaries[0];
+        let s = &d.boundaries[1];
+        assert_eq!(e.kind, BoundaryKind::Enterprise);
+        assert_eq!(e.parent, None);
+        assert_eq!(e.member_elems, vec!["c2".to_string()]);
+        assert_eq!(s.kind, BoundaryKind::System);
+        assert_eq!(s.parent, Some(0));
+        assert_eq!(s.member_elems, vec!["c1".to_string()]);
+    }
+
+    #[test]
+    fn boundary_rect_encloses_member_centers() {
+        let src = "C4Container\n\
+            System_Boundary(b1, \"My System\") {\n\
+            Container(c1, \"Web\")\n\
+            Container(c2, \"DB\")\n\
+            }\n\
+            Container(c3, \"Outside\")\n\
+            Rel(c1, c2, \"x\")";
+        let r = render_c4(src, &opts()).unwrap();
+        // A dashed boundary rect must be present.
+        assert!(
+            r.svg.contains("stroke-dasharray=\"7,7\""),
+            "dashed boundary rect missing: {}",
+            r.svg
+        );
+        // And the boundary label + type.
+        assert!(r.svg.contains(">My System<"));
+        assert!(r.svg.contains("«System»"));
+    }
+
+    #[test]
+    fn nested_boundary_render_has_two_dashed_rects() {
+        let src = "C4Container\n\
+            Enterprise_Boundary(e1, \"Ent\") {\n\
+            System_Boundary(s1, \"Sys\") {\n\
+            Container(c1, \"Web\")\n\
+            }\n\
+            }";
+        let r = render_c4(src, &opts()).unwrap();
+        assert_eq!(
+            r.svg.matches("stroke-dasharray=\"7,7\"").count(),
+            2,
+            "expected two dashed boundary rects: {}",
+            r.svg
+        );
+        assert!(r.svg.contains("«Enterprise»"));
+        assert!(r.svg.contains("«System»"));
+    }
+
+    #[test]
+    fn boundary_drawn_before_element_boxes() {
+        let src = "C4Container\n\
+            System_Boundary(b1, \"My System\") {\n\
+            Container(c1, \"Web\")\n\
+            }";
+        let r = render_c4(src, &opts()).unwrap();
+        let dash = r.svg.find("stroke-dasharray=\"7,7\"").unwrap();
+        // The element box is a rounded rect with rx="3"; the boundary uses
+        // rx="2.5". The dashed boundary rect must precede the first element box.
+        let elem_box = r.svg.find("rx=\"3\" ry=\"3\"").unwrap();
+        assert!(dash < elem_box, "boundary not drawn before element box");
+    }
+
+    #[test]
+    fn no_boundary_diagram_unchanged() {
+        // A diagram with no boundaries must contain no dashed boundary rects and
+        // render identically through the no-boundary path.
+        let src = "C4Context\n\
+            Person(u, \"User\")\n\
+            System(s, \"Sys\")\n\
+            Rel(u, s, \"uses\")";
+        let r = render_c4(src, &opts()).unwrap();
+        let d = parse(src).unwrap();
+        assert!(d.boundaries.is_empty());
+        assert!(!r.svg.contains("stroke-dasharray"));
     }
 
     #[test]
@@ -1029,6 +1393,37 @@ mod tests {
         assert!(r.svg.contains("A &amp; B &lt; C"));
         assert!(r.svg.contains("x &gt; y"));
         assert!(!r.svg.contains("A & B"));
+    }
+
+    #[test]
+    fn element_name_renders_inline_math() {
+        // An element name containing `$…$` renders the embedded math group
+        // rather than a plain bold `<text>` with the raw dollars.
+        let src = "C4Context\nSystem(s, \"Energy $x^2$\")";
+        let r = render_c4(src, &opts()).unwrap();
+        assert!(r.svg.contains("<g transform"), "expected math group: {}", r.svg);
+        assert!(r.svg.contains("<path"), "expected math path: {}", r.svg);
+    }
+
+    #[test]
+    fn relationship_label_renders_bold_markdown() {
+        // A `**bold**` relationship label renders a bold run, not literal `**`.
+        let src = "C4Context\n\
+            System(a, \"A\")\n\
+            System(b, \"B\")\n\
+            Rel(a, b, \"**calls**\")";
+        let r = render_c4(src, &opts()).unwrap();
+        assert!(r.svg.contains("font-weight=\"bold\""), "expected bold run: {}", r.svg);
+        assert!(!r.svg.contains("**calls**"), "raw markdown leaked: {}", r.svg);
+    }
+
+    #[test]
+    fn plain_element_name_keeps_bold_text() {
+        // A plain (non-rich) name must still render as a bold <text> — unchanged.
+        let src = "C4Context\nSystem(s, \"Plain\")";
+        let r = render_c4(src, &opts()).unwrap();
+        assert!(r.svg.contains(">Plain<"));
+        assert!(r.svg.contains("font-weight=\"bold\""), "plain name lost bold: {}", r.svg);
     }
 
     #[test]
