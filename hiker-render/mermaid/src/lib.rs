@@ -80,8 +80,8 @@ pub use treeview::render_treeview;
 pub use wardley::render_wardley;
 pub use block::render_block;
 pub use c4::render_c4;
-pub use class::render_class;
-pub use er::render_er;
+pub use class::{render_class, render_class_with_regions};
+pub use er::{render_er, render_er_with_regions};
 pub use gantt::render_gantt;
 pub use gitgraph::render_gitgraph;
 pub use journey::render_journey;
@@ -94,7 +94,7 @@ pub use radar::render_radar;
 pub use requirement::render_requirement;
 pub use sankey::render_sankey;
 pub use sequence::render_sequence;
-pub use state::render_state;
+pub use state::{render_state, render_state_with_regions};
 pub use timeline::render_timeline;
 pub use treemap::render_treemap;
 pub use venn::render_venn;
@@ -323,7 +323,27 @@ pub fn render_with_regions(
             finish_svg(&mut rendered, opts);
             Ok((rendered, regions))
         }
-        // Non-flowchart: render normally, no regions.
+        // Class / state / ER diagrams: their renderers build per-node boxes for
+        // drawing, so they can return the matching hit regions (mirrors how
+        // `dispatch` recognizes these keywords).
+        Some("classDiagram") => {
+            let (mut rendered, regions) = class::render_class_with_regions(&clean, opts)?;
+            finish_svg(&mut rendered, opts);
+            Ok((rendered, regions))
+        }
+        Some("stateDiagram") | Some("stateDiagram-v2") => {
+            let (mut rendered, regions) = state::render_state_with_regions(&clean, opts)?;
+            finish_svg(&mut rendered, opts);
+            Ok((rendered, regions))
+        }
+        Some("erDiagram") => {
+            let (mut rendered, regions) = er::render_er_with_regions(&clean, opts)?;
+            finish_svg(&mut rendered, opts);
+            Ok((rendered, regions))
+        }
+        // Other diagram types (pie, sequence, gantt, gitGraph, …) have no mermaid
+        // interaction model — gitGraph has no `click` on commits, and the rest no
+        // `click` directive at all — so they render normally with empty regions.
         _ => {
             let mut rendered = dispatch(&clean, opts)?;
             finish_svg(&mut rendered, opts);
@@ -472,5 +492,40 @@ mod region_tests {
         assert_eq!(plain.svg, with_regions.svg);
         assert_eq!(plain.width_px, with_regions.width_px);
         assert_eq!(plain.height_px, with_regions.height_px);
+    }
+
+    #[test]
+    fn class_diagram_regions_via_render_with_regions() {
+        let opts = MermaidOptions::default();
+        let src = "classDiagram\n class Animal\n class Dog\n Animal <|-- Dog\n click Animal \"https://x\" \"tip\"";
+        let (render, regions) = render_with_regions(src, &opts).expect("render ok");
+        let a = regions.iter().find(|r| r.id == "Animal").expect("region for Animal");
+        assert_eq!(a.link.as_deref(), Some("https://x"));
+        assert_eq!(a.tooltip.as_deref(), Some("tip"));
+        assert!(a.w > 0.0 && a.h > 0.0);
+        // finish_svg applied (background rect injected).
+        assert!(render.svg.contains("<rect"));
+    }
+
+    #[test]
+    fn state_diagram_regions_via_render_with_regions() {
+        let opts = MermaidOptions::default();
+        let src = "stateDiagram-v2\n s1 --> s2\n click s1 \"https://x\" \"tip\"";
+        let (_render, regions) = render_with_regions(src, &opts).expect("render ok");
+        let r = regions.iter().find(|r| r.id == "s1").expect("region for s1");
+        assert_eq!(r.link.as_deref(), Some("https://x"));
+        assert_eq!(r.tooltip.as_deref(), Some("tip"));
+        assert!(r.w > 0.0 && r.h > 0.0);
+    }
+
+    #[test]
+    fn er_diagram_regions_via_render_with_regions() {
+        let opts = MermaidOptions::default();
+        let src = "erDiagram\n CUSTOMER ||--o{ ORDER : places\n click CUSTOMER \"https://x\" \"tip\"";
+        let (_render, regions) = render_with_regions(src, &opts).expect("render ok");
+        let c = regions.iter().find(|r| r.id == "CUSTOMER").expect("region for CUSTOMER");
+        assert_eq!(c.link.as_deref(), Some("https://x"));
+        assert_eq!(c.tooltip.as_deref(), Some("tip"));
+        assert!(c.w > 0.0 && c.h > 0.0);
     }
 }

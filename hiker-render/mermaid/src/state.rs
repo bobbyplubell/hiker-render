@@ -24,7 +24,7 @@ use hiker_graph::{GraphInput, LayeredEngine, LayoutEngine, Vec2};
 
 use crate::model::ElemStyle;
 use crate::svgutil::{edge_label_anchor, escape, opacity_attr, rgb};
-use crate::{MermaidError, MermaidOptions, MermaidRender};
+use crate::{HitRegion, MermaidError, MermaidOptions, MermaidRender};
 
 // ── Styling directives (classDef / class / style / :::) ───────────────────────
 //
@@ -272,6 +272,12 @@ struct State {
     composite: bool,
     /// Per-state style overrides (from `classDef`/`class`/`style`/`:::`).
     style: ElemStyle,
+    /// `click` interaction data: open URL (`link`), host callback name
+    /// (`callback`), and hover `tooltip`. `None` unless a `click` directive
+    /// targeted this state.
+    link: Option<String>,
+    callback: Option<String>,
+    tooltip: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,6 +410,17 @@ fn parse(src: &str) -> Result<StateDiagram, String> {
 
         // Concurrency divider — skipped.
         if line == "--" || (line.starts_with("--") && !line.contains("-->")) {
+            continue;
+        }
+
+        // Interaction directives: `click <id> ...` (same grammar as flowchart).
+        // States are declared/inferred elsewhere; an unknown id is skipped, never
+        // fabricated.
+        if line.starts_with("click ") {
+            let rest = line["click".len()..].trim_start();
+            if let Some(c) = parse_click(rest) {
+                apply_click(&mut diag, &index_of, &c);
+            }
             continue;
         }
 
@@ -609,6 +626,145 @@ fn parse_line(
     }
 }
 
+/// Attach a parsed `click` directive's link/callback/tooltip to the named state
+/// (looked up by canonical id). Unknown ids are skipped — states are declared or
+/// inferred from transitions, so we never fabricate one here.
+fn apply_click(diag: &mut StateDiagram, index_of: &HashMap<String, usize>, c: &ClickDirective) {
+    let Some(&i) = index_of.get(&c.id) else {
+        return;
+    };
+    let s = &mut diag.states[i];
+    if c.link.is_some() {
+        s.link = c.link.clone();
+    }
+    if c.callback.is_some() {
+        s.callback = c.callback.clone();
+    }
+    if c.tooltip.is_some() {
+        s.tooltip = c.tooltip.clone();
+    }
+}
+
+// ── Click directives ──────────────────────────────────────────────────────────
+//
+// Same quote-aware grammar as the flowchart `click` parser (`parse.rs`):
+// - `<id> "<url>" ["<tooltip>"]`             → link (+ tooltip)
+// - `<id> href "<url>" ["<tooltip>"]`        → link (+ tooltip)
+// - `<id> call <name>(<args>) ["<tooltip>"]` → callback = name (args dropped)
+// - `<id> <name>` (bareword)                 → callback = the word
+
+/// A parsed `click` directive body.
+struct ClickDirective {
+    id: String,
+    link: Option<String>,
+    callback: Option<String>,
+    tooltip: Option<String>,
+}
+
+/// A token from a `click` directive body: a bare word or a double-quoted string.
+enum ClickTok {
+    Word(String),
+    Quoted(String),
+}
+
+/// Parse a `click` directive body (everything after the `click` keyword).
+/// Returns `None` if no id is present.
+fn parse_click(rest: &str) -> Option<ClickDirective> {
+    let toks = tokenize_click(rest);
+    let mut it = toks.into_iter();
+    let id = match it.next()? {
+        ClickTok::Word(w) => w,
+        ClickTok::Quoted(_) => return None,
+    };
+    let mut link = None;
+    let mut callback = None;
+    let mut tooltip = None;
+
+    let rest_toks: Vec<ClickTok> = it.collect();
+    let mut i = 0;
+    while i < rest_toks.len() {
+        match &rest_toks[i] {
+            ClickTok::Word(w) if w == "href" => {
+                if let Some(ClickTok::Quoted(u)) = rest_toks.get(i + 1) {
+                    link = Some(u.clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ClickTok::Word(w) if w == "call" => {
+                if let Some(ClickTok::Word(callee)) = rest_toks.get(i + 1) {
+                    let name = callee.split('(').next().unwrap_or(callee).trim();
+                    if !name.is_empty() {
+                        callback = Some(name.to_string());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ClickTok::Word(w) if w == "_blank" || w == "_self" => {
+                i += 1;
+            }
+            ClickTok::Word(w) => {
+                if link.is_none() && callback.is_none() {
+                    let name = w.split('(').next().unwrap_or(w).trim();
+                    if !name.is_empty() {
+                        callback = Some(name.to_string());
+                    }
+                }
+                i += 1;
+            }
+            ClickTok::Quoted(s) => {
+                if link.is_none() && callback.is_none() {
+                    link = Some(s.clone());
+                } else if tooltip.is_none() {
+                    tooltip = Some(s.clone());
+                }
+                i += 1;
+            }
+        }
+    }
+
+    Some(ClickDirective { id, link, callback, tooltip })
+}
+
+/// Split a `click` directive body into quote-aware tokens.
+fn tokenize_click(s: &str) -> Vec<ClickTok> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += 1;
+            }
+            let inner = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            out.push(ClickTok::Quoted(inner.to_string()));
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else {
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'"' {
+                i += 1;
+            }
+            let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            if !word.is_empty() {
+                out.push(ClickTok::Word(word.to_string()));
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Peel a trailing `:::className` off a state token, returning the bare token
 /// and the class name (if any). The bare token is trimmed.
 fn peel_css(tok: &str) -> (String, Option<String>) {
@@ -659,6 +815,9 @@ fn ensure_state(
         parent,
         composite: false,
         style: ElemStyle::default(),
+        link: None,
+        callback: None,
+        tooltip: None,
     });
     i
 }
@@ -732,6 +891,24 @@ fn split_css_class(tok: &str) -> Option<(String, String)> {
 
 /// Render a mermaid `state` diagram to SVG.
 pub fn render_state(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, MermaidError> {
+    Ok(render_state_inner(src, opts)?.0)
+}
+
+/// Like [`render_state`], but also returns one [`HitRegion`] per state node (its
+/// drawn rect plus any `click` data), in SVG-px coords. Used by
+/// `render_with_regions` to make state diagrams interactive.
+pub fn render_state_with_regions(
+    src: &str,
+    opts: &MermaidOptions,
+) -> Result<(MermaidRender, Vec<HitRegion>), MermaidError> {
+    render_state_inner(src, opts)
+}
+
+/// Shared pipeline for [`render_state`] / [`render_state_with_regions`].
+fn render_state_inner(
+    src: &str,
+    opts: &MermaidOptions,
+) -> Result<(MermaidRender, Vec<HitRegion>), MermaidError> {
     let diag = parse(src).map_err(MermaidError::Parse)?;
     if diag.states.is_empty() {
         return Err(MermaidError::Empty);
@@ -856,6 +1033,20 @@ pub fn render_state(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
     );
     emit_defs(&mut svg, opts);
 
+    // One hit region per drawn state node (and composite), accumulated alongside
+    // drawing so each rect matches its on-canvas box exactly.
+    let mut regions: Vec<HitRegion> = Vec::with_capacity(diag.states.len());
+    let region_for = |s: &State, cx: f32, cy: f32, w: f32, h: f32| HitRegion {
+        id: s.id.clone(),
+        x: cx - w / 2.0,
+        y: cy - h / 2.0,
+        w,
+        h,
+        link: s.link.clone(),
+        callback: s.callback.clone(),
+        tooltip: s.tooltip.clone(),
+    };
+
     // Composite boundary boxes first (behind everything), largest-first so a
     // nested composite layers on top of its enclosing one. The container rect is
     // read back from the engine: center = positions[i], size = node_sizes[i].
@@ -882,6 +1073,7 @@ pub fn render_state(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
             continue;
         }
         emit_composite(&mut svg, &diag.states[i], center, size, opts);
+        regions.push(region_for(&diag.states[i], center.x, center.y, size.x, size.y));
     }
 
     // Group edges by unordered endpoint pair so bidirectional / parallel
@@ -926,6 +1118,7 @@ pub fn render_state(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
         let pos = out.positions.get(i).copied().unwrap_or(Vec2::ZERO);
         let (w, h) = sizes[i];
         emit_node(&mut svg, s, pos.x, pos.y, w, h, opts);
+        regions.push(region_for(s, pos.x, pos.y, w, h));
     }
 
     // Notes: not part of the dagre graph — placed beside their target's final
@@ -944,11 +1137,14 @@ pub fn render_state(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
 
     svg.push_str("</svg>");
 
-    Ok(MermaidRender {
-        svg,
-        width_px: width,
-        height_px: height,
-    })
+    Ok((
+        MermaidRender {
+            svg,
+            width_px: width,
+            height_px: height,
+        },
+        regions,
+    ))
 }
 
 /// Arrowhead marker shared by every transition.
@@ -985,11 +1181,8 @@ fn emit_edge(
     let mut pts = points.to_vec();
     pullback_end(&mut pts, 9.0);
 
-    let mut d = String::new();
-    for (i, (x, y)) in pts.iter().enumerate() {
-        let cmd = if i == 0 { 'M' } else { 'L' };
-        let _ = write!(d, "{cmd}{x:.2},{y:.2} ");
-    }
+    // Smooth curve through the (already arrowhead-shortened) points.
+    let d = crate::svgutil::smooth_path_d(&pts);
     let _ = write!(
         svg,
         "<path d=\"{}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"1.5\"{so} \
@@ -1663,5 +1856,49 @@ mod tests {
         let a = render_state(src, &opts()).unwrap();
         let b = render_state(src, &opts()).unwrap();
         assert_eq!(a, b);
+    }
+
+    // ---- click / interaction ----
+
+    #[test]
+    fn click_sets_link_and_tooltip() {
+        let src = "stateDiagram-v2\n s1 --> s2\n click s1 \"https://x\" \"tip\"\n";
+        let d = parse(src).unwrap();
+        let s1 = d.states.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s1.link.as_deref(), Some("https://x"));
+        assert_eq!(s1.tooltip.as_deref(), Some("tip"));
+        assert!(s1.callback.is_none());
+        // Unknown id is skipped, not fabricated.
+        let d2 = parse("stateDiagram-v2\n s1 --> s2\n click Ghost \"https://y\"\n").unwrap();
+        assert!(d2.states.iter().all(|s| s.id != "Ghost"));
+    }
+
+    #[test]
+    fn regions_carry_click_data() {
+        let src = "stateDiagram-v2\n s1 --> s2\n click s1 \"https://x\" \"tip\"\n";
+        let (render, regions) = render_state_with_regions(src, &opts()).unwrap();
+        let r = regions.iter().find(|r| r.id == "s1").unwrap();
+        assert_eq!(r.link.as_deref(), Some("https://x"));
+        assert_eq!(r.tooltip.as_deref(), Some("tip"));
+        assert!(r.w > 0.0 && r.h > 0.0);
+        assert!(r.x >= 0.0 && r.y >= 0.0);
+        assert!(r.x + r.w <= render.width_px + 1.0);
+        assert!(r.y + r.h <= render.height_px + 1.0);
+    }
+
+    #[test]
+    fn regions_without_click_and_svg_unchanged() {
+        let src = "stateDiagram-v2\n s1 --> s2\n s2 --> s3\n";
+        let plain = render_state(src, &opts()).unwrap();
+        let (with_regions, regions) = render_state_with_regions(src, &opts()).unwrap();
+        // A region for each of s1/s2/s3 (plus pseudo states), all click-free.
+        for id in ["s1", "s2", "s3"] {
+            let r = regions.iter().find(|r| r.id == id).unwrap();
+            assert!(r.link.is_none() && r.callback.is_none() && r.tooltip.is_none());
+            assert!(r.w > 0.0 && r.h > 0.0);
+        }
+        assert_eq!(plain.svg, with_regions.svg);
+        assert_eq!(plain.width_px, with_regions.width_px);
+        assert_eq!(plain.height_px, with_regions.height_px);
     }
 }

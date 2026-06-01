@@ -287,6 +287,117 @@ fn emit_node(svg: &mut String, node: &PositionedNode, opts: &MermaidOptions) {
                 b = r - s,
             );
         }
+        NodeShape::Cylinder => {
+            // Database cylinder: a top ellipse cap, vertical sides, and a bottom
+            // arc. `ry` is the cap's vertical radius; the body spans the rest.
+            let ry = 8.0_f32.min(h / 4.0);
+            let rx = w / 2.0;
+            let top = y;
+            let bot = y + h;
+            // Body + bottom: start at top-left, down the left side, sweep the
+            // bottom arc to the right side, back up; then the top ellipse on top.
+            let _ = write!(
+                svg,
+                "<path d=\"M{l:.2},{ty:.2} \
+                 L{l:.2},{by:.2} \
+                 A{rx:.2},{ry:.2} 0 0 0 {r:.2},{by:.2} \
+                 L{r:.2},{ty:.2} \
+                 A{rx:.2},{ry:.2} 0 0 1 {l:.2},{ty:.2} \
+                 M{l:.2},{ty:.2} \
+                 A{rx:.2},{ry:.2} 0 0 0 {r:.2},{ty:.2} \
+                 A{rx:.2},{ry:.2} 0 0 0 {l:.2},{ty:.2} Z\" {style}/>",
+                l = x,
+                r = x + w,
+                ty = top + ry,
+                by = bot - ry,
+                rx = rx,
+                ry = ry,
+            );
+        }
+        NodeShape::Subroutine => {
+            // Outer rect + two vertical bars inset ~8px from each side.
+            let inset = 8.0_f32.min(w / 4.0);
+            let _ = write!(
+                svg,
+                "<rect x=\"{x:.2}\" y=\"{y:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" {style}/>\
+                 <line x1=\"{xl:.2}\" y1=\"{y:.2}\" x2=\"{xl:.2}\" y2=\"{yb:.2}\" {style}/>\
+                 <line x1=\"{xr:.2}\" y1=\"{y:.2}\" x2=\"{xr:.2}\" y2=\"{yb:.2}\" {style}/>",
+                xl = x + inset,
+                xr = x + w - inset,
+                yb = y + h,
+            );
+        }
+        NodeShape::Document => {
+            // Rect with a wavy (quadratic-curve) bottom edge. The wave dips below
+            // `bot` on the left half and rises on the right (a single S-ish wave).
+            let l = x;
+            let r = x + w;
+            let top = y;
+            let bot = y + h;
+            let wave = 8.0_f32.min(h / 3.0);
+            let midx = x + w / 2.0;
+            let _ = write!(
+                svg,
+                "<path d=\"M{l:.2},{top:.2} \
+                 L{r:.2},{top:.2} \
+                 L{r:.2},{bot:.2} \
+                 Q{qx1:.2},{qy1:.2} {midx:.2},{bot:.2} \
+                 Q{qx2:.2},{qy2:.2} {l:.2},{bot:.2} \
+                 Z\" {style}/>",
+                qx1 = r - w / 4.0,
+                qy1 = bot + wave,
+                qx2 = l + w / 4.0,
+                qy2 = bot - wave,
+            );
+        }
+        NodeShape::Parallelogram | NodeShape::ParallelogramAlt => {
+            // 4-point slanted box. Parallelogram leans right (top shifted +slant,
+            // bottom −slant); the Alt variant leans the other way.
+            let slant = (h * 0.5).min(w * 0.4);
+            let l = x;
+            let r = x + w;
+            let top = y;
+            let bot = y + h;
+            let (tl, tr, bl, br) = if matches!(shape, NodeShape::Parallelogram) {
+                (l + slant, r, l, r - slant)
+            } else {
+                (l, r - slant, l + slant, r)
+            };
+            let _ = write!(
+                svg,
+                "<polygon points=\"{tl:.2},{top:.2} {tr:.2},{top:.2} {br:.2},{bot:.2} {bl:.2},{bot:.2}\" {style}/>",
+            );
+        }
+        NodeShape::Trapezoid | NodeShape::TrapezoidAlt => {
+            // 4-point trapezoid. Trapezoid = narrow top / wide bottom; the Alt
+            // variant = wide top / narrow bottom.
+            let slant = (h * 0.5).min(w * 0.4);
+            let l = x;
+            let r = x + w;
+            let top = y;
+            let bot = y + h;
+            let (tl, tr, bl, br) = if matches!(shape, NodeShape::Trapezoid) {
+                (l + slant, r - slant, l, r)
+            } else {
+                (l, r, l + slant, r - slant)
+            };
+            let _ = write!(
+                svg,
+                "<polygon points=\"{tl:.2},{top:.2} {tr:.2},{top:.2} {br:.2},{bot:.2} {bl:.2},{bot:.2}\" {style}/>",
+            );
+        }
+        NodeShape::DoubleCircle => {
+            // Two concentric ellipses: an outer ring + an inner one ~4px smaller.
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let _ = write!(
+                svg,
+                "<ellipse cx=\"{cx:.2}\" cy=\"{cy:.2}\" rx=\"{rx:.2}\" ry=\"{ry:.2}\" {style}/>\
+                 <ellipse cx=\"{cx:.2}\" cy=\"{cy:.2}\" rx=\"{irx:.2}\" ry=\"{iry:.2}\" {style}/>",
+                irx = (rx - 4.0).max(1.0),
+                iry = (ry - 4.0).max(1.0),
+            );
+        }
     }
 
     let text_color = node.style.text_color.unwrap_or(opts.text_color);
@@ -449,6 +560,35 @@ mod tests {
         assert_eq!(svg.matches("<rect").count(), 2);
         // One <polygon> for the diamond node (B).
         assert_eq!(svg.matches("<polygon").count(), 1);
+    }
+
+    #[test]
+    fn new_shapes_emit_path_or_polygon() {
+        // Each new flowchart shape must render as a <path> or <polygon> (plus the
+        // double circle's two <ellipse>s). Smoke test: render each in isolation.
+        for shape in [
+            NodeShape::Cylinder,
+            NodeShape::Subroutine,
+            NodeShape::Document,
+            NodeShape::Parallelogram,
+            NodeShape::ParallelogramAlt,
+            NodeShape::Trapezoid,
+            NodeShape::TrapezoidAlt,
+            NodeShape::DoubleCircle,
+        ] {
+            let d = PositionedDiagram {
+                nodes: vec![node("N", shape, 50.0, 50.0)],
+                edges: vec![],
+                clusters: vec![],
+                width: 100.0,
+                height: 100.0,
+            };
+            let svg = draw_svg(&d, &MermaidOptions::default());
+            let has_geom = svg.contains("<path")
+                || svg.contains("<polygon")
+                || svg.contains("<ellipse");
+            assert!(has_geom, "{shape:?} emitted no path/polygon/ellipse: {svg}");
+        }
     }
 
     #[test]

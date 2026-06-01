@@ -63,6 +63,31 @@ pub fn measure_node(label: &str, shape: NodeShape, opts: &MermaidOptions) -> (f3
             let h = text_h + 2.0 * pad_y;
             (text_w + 2.0 * pad_x + h, h)
         }
+
+        // Cylinder (database): a padded box plus vertical room for the top
+        // ellipse cap (~10px) so the label clears it.
+        NodeShape::Cylinder => (text_w + 2.0 * pad_x, text_h + 2.0 * pad_y + 10.0),
+
+        // Subroutine: a padded box plus horizontal room for the two inner bars
+        // (~8px inset each side).
+        NodeShape::Subroutine => (text_w + 2.0 * pad_x + 16.0, text_h + 2.0 * pad_y),
+
+        // Document: a padded box plus a little extra at the bottom for the wave.
+        NodeShape::Document => (text_w + 2.0 * pad_x, text_h + 2.0 * pad_y + 8.0),
+
+        // Parallelogram/Trapezoid: a padded box plus horizontal room for the
+        // slanted left/right edges so the label clears them.
+        NodeShape::Parallelogram
+        | NodeShape::ParallelogramAlt
+        | NodeShape::Trapezoid
+        | NodeShape::TrapezoidAlt => (text_w + 2.0 * pad_x + 20.0, text_h + 2.0 * pad_y),
+
+        // Double circle: like Circle, plus a few px for the outer ring.
+        NodeShape::DoubleCircle => {
+            let diag = text_w.hypot(text_h);
+            let d = diag + 2.0 * pad_x + 8.0;
+            (d, d)
+        }
     };
 
     w = w.max(MIN_W);
@@ -87,6 +112,14 @@ mod tests {
             NodeShape::Circle,
             NodeShape::Diamond,
             NodeShape::Hexagon,
+            NodeShape::Cylinder,
+            NodeShape::Subroutine,
+            NodeShape::Document,
+            NodeShape::Parallelogram,
+            NodeShape::ParallelogramAlt,
+            NodeShape::Trapezoid,
+            NodeShape::TrapezoidAlt,
+            NodeShape::DoubleCircle,
         ] {
             let (w, h) = measure_node("Hello", shape, &opts());
             assert!(w > 0.0 && h > 0.0, "{shape:?} -> ({w},{h})");

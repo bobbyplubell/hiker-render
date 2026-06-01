@@ -36,6 +36,22 @@ pub enum NodeShape {
     Diamond,
     /// `A{{label}}` — hexagon.
     Hexagon,
+    /// `A[(label)]` / `@{ shape: cylinder }` — database cylinder.
+    Cylinder,
+    /// `A[[label]]` / `@{ shape: subroutine }` — subroutine (framed rect).
+    Subroutine,
+    /// `@{ shape: document }` — document (wavy bottom edge).
+    Document,
+    /// `A[/label/]` / `@{ shape: lean-right }` — parallelogram (slant right).
+    Parallelogram,
+    /// `A[\label\]` / `@{ shape: lean-left }` — parallelogram (slant left).
+    ParallelogramAlt,
+    /// `A[/label\]` / `@{ shape: trapezoid }` — trapezoid (narrow top).
+    Trapezoid,
+    /// `A[\label/]` / `@{ shape: trapezoid-top }` — trapezoid (wide top).
+    TrapezoidAlt,
+    /// `A(((label)))` / `@{ shape: double-circle }` — double circle.
+    DoubleCircle,
 }
 
 /// Per-element style overrides from `classDef` / `class` / `style` / `linkStyle`

@@ -19,7 +19,7 @@
 use std::fmt::Write as _;
 
 use crate::svgutil::{edge_label_anchor, escape, opacity_attr, rgb, text_size, LINE_HEIGHT_EM};
-use crate::{MermaidError, MermaidOptions, MermaidRender};
+use crate::{HitRegion, MermaidError, MermaidOptions, MermaidRender};
 
 use crate::model::ElemStyle;
 use hiker_graph::layered::RankDir;
@@ -300,6 +300,12 @@ pub struct Class {
     pub methods: Vec<Member>,
     /// Per-class style overrides (from `classDef`/`class`/`cssClass`/`style`/`:::`).
     pub style: ElemStyle,
+    /// `click` interaction data: open URL (`link`), host callback name
+    /// (`callback`), and hover `tooltip`. All `None` unless a `click`/`link`/
+    /// `callback` directive targeted this class.
+    pub link: Option<String>,
+    pub callback: Option<String>,
+    pub tooltip: Option<String>,
 }
 
 /// A note rectangle: either attached to a class (`note for Class "text"`) or
@@ -392,6 +398,26 @@ impl ClassDiagram {
             self.classes[i].methods.push(m);
         } else {
             self.classes[i].attributes.push(m);
+        }
+    }
+
+    /// Attach a parsed `click` directive's link/callback/tooltip to the named
+    /// class. Unknown ids are skipped (classes are declared explicitly, so we
+    /// do not fabricate one). The id may carry a generic suffix; match the base.
+    fn apply_click(&mut self, c: &ClickDirective) {
+        let base = strip_generic(&c.id);
+        let Some(i) = self.classes.iter().position(|cl| cl.name == base) else {
+            return;
+        };
+        let cl = &mut self.classes[i];
+        if c.link.is_some() {
+            cl.link = c.link.clone();
+        }
+        if c.callback.is_some() {
+            cl.callback = c.callback.clone();
+        }
+        if c.tooltip.is_some() {
+            cl.tooltip = c.tooltip.clone();
         }
     }
 }
@@ -611,6 +637,127 @@ fn unquote(s: &str) -> String {
         .to_string()
 }
 
+// ── Click directives ──────────────────────────────────────────────────────────
+//
+// Same quote-aware grammar as the flowchart `click` parser (`parse.rs`), shared
+// across the interactive diagram types:
+// - `<id> "<url>" ["<tooltip>"]`             → link (+ tooltip)
+// - `<id> href "<url>" ["<tooltip>"]`        → link (+ tooltip)
+// - `<id> call <name>(<args>) ["<tooltip>"]` → callback = name (args dropped)
+// - `<id> callback` / `<id> <name>` (bareword) → callback = the word
+
+/// A parsed `click`/`link`/`callback` directive body.
+struct ClickDirective {
+    id: String,
+    link: Option<String>,
+    callback: Option<String>,
+    tooltip: Option<String>,
+}
+
+/// A token from a `click` directive body: a bare word or a double-quoted string.
+enum ClickTok {
+    Word(String),
+    Quoted(String),
+}
+
+/// Parse a `click` directive body (everything after the `click`/`link`/
+/// `callback` keyword). Returns `None` if no id is present.
+fn parse_click(rest: &str) -> Option<ClickDirective> {
+    let toks = tokenize_click(rest);
+    let mut it = toks.into_iter();
+    let id = match it.next()? {
+        ClickTok::Word(w) => w,
+        ClickTok::Quoted(_) => return None,
+    };
+    let mut link = None;
+    let mut callback = None;
+    let mut tooltip = None;
+
+    let rest_toks: Vec<ClickTok> = it.collect();
+    let mut i = 0;
+    while i < rest_toks.len() {
+        match &rest_toks[i] {
+            ClickTok::Word(w) if w == "href" => {
+                if let Some(ClickTok::Quoted(u)) = rest_toks.get(i + 1) {
+                    link = Some(u.clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ClickTok::Word(w) if w == "call" => {
+                if let Some(ClickTok::Word(callee)) = rest_toks.get(i + 1) {
+                    let name = callee.split('(').next().unwrap_or(callee).trim();
+                    if !name.is_empty() {
+                        callback = Some(name.to_string());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ClickTok::Word(w) if w == "_blank" || w == "_self" => {
+                i += 1;
+            }
+            ClickTok::Word(w) => {
+                if link.is_none() && callback.is_none() {
+                    let name = w.split('(').next().unwrap_or(w).trim();
+                    if !name.is_empty() {
+                        callback = Some(name.to_string());
+                    }
+                }
+                i += 1;
+            }
+            ClickTok::Quoted(s) => {
+                if link.is_none() && callback.is_none() {
+                    link = Some(s.clone());
+                } else if tooltip.is_none() {
+                    tooltip = Some(s.clone());
+                }
+                i += 1;
+            }
+        }
+    }
+
+    Some(ClickDirective { id, link, callback, tooltip })
+}
+
+/// Split a `click` directive body into quote-aware tokens.
+fn tokenize_click(s: &str) -> Vec<ClickTok> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += 1;
+            }
+            let inner = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            out.push(ClickTok::Quoted(inner.to_string()));
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else {
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'"' {
+                i += 1;
+            }
+            let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            if !word.is_empty() {
+                out.push(ClickTok::Word(word.to_string()));
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Parse `classDiagram` source. Errors if the header is wrong.
 pub fn parse(src: &str) -> Result<ClassDiagram, String> {
     let mut lines = src.lines().map(|l| l.split("%%").next().unwrap_or("")).peekable();
@@ -689,13 +836,23 @@ pub fn parse(src: &str) -> Result<ClassDiagram, String> {
             continue;
         }
 
-        // Skip standalone directives we don't model.
-        if line.starts_with("direction")
-            || line.starts_with("namespace")
-            || line.starts_with("click")
-            || line.starts_with("callback")
-            || line.starts_with("link")
+        // Interaction directives: `click <id> ...`, `link <id> ...`,
+        // `callback <id> ...`. All share the same click grammar (see
+        // [`parse_click`]). Unknown ids are skipped — class diagrams declare
+        // classes explicitly, so we never fabricate one from a `click`.
+        if line.starts_with("click ")
+            || line.starts_with("link ")
+            || line.starts_with("callback ")
         {
+            let rest = line.split_once(char::is_whitespace).map(|(_, r)| r).unwrap_or("");
+            if let Some(c) = parse_click(rest) {
+                diagram.apply_click(&c);
+            }
+            continue;
+        }
+
+        // Skip standalone directives we don't model.
+        if line.starts_with("direction") || line.starts_with("namespace") {
             continue;
         }
 
@@ -1162,11 +1319,9 @@ fn emit_relation(svg: &mut String, r: &RoutedRel, rel: &Relation, opts: &Mermaid
         pullback(&mut pts, rel.marker_at_to, MARK_LEN);
     }
 
-    let mut d = String::new();
-    for (i, (px, py)) in pts.iter().enumerate() {
-        let cmd = if i == 0 { 'M' } else { 'L' };
-        let _ = write!(d, "{cmd}{px:.2},{py:.2} ");
-    }
+    // Smooth curve through the (already marker-shortened) points; the marker is
+    // drawn separately from the original un-shortened points below.
+    let d = crate::svgutil::smooth_path_d(&pts);
     let dash = if rel.dashed { " stroke-dasharray=\"5 4\"" } else { "" };
     let _ = write!(
         svg,
@@ -1433,6 +1588,25 @@ fn draw(diagram: &ClassDiagram, lay: &Layout, opts: &MermaidOptions) -> String {
 
 /// Render a mermaid `classDiagram` to SVG.
 pub fn render_class(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, MermaidError> {
+    Ok(render_class_inner(src, opts)?.0)
+}
+
+/// Like [`render_class`], but also returns one [`HitRegion`] per class box (its
+/// drawn rect plus any `click`/`link`/`callback` data), in SVG-px coords. Used
+/// by `render_with_regions` to make class diagrams interactive.
+pub fn render_class_with_regions(
+    src: &str,
+    opts: &MermaidOptions,
+) -> Result<(MermaidRender, Vec<HitRegion>), MermaidError> {
+    render_class_inner(src, opts)
+}
+
+/// Shared pipeline for [`render_class`] / [`render_class_with_regions`]: parse →
+/// layout → draw, deriving the hit regions from the very same positioned boxes.
+fn render_class_inner(
+    src: &str,
+    opts: &MermaidOptions,
+) -> Result<(MermaidRender, Vec<HitRegion>), MermaidError> {
     let diagram = parse(src).map_err(MermaidError::Parse)?;
     if diagram.classes.is_empty() {
         return Err(MermaidError::Empty);
@@ -1440,11 +1614,31 @@ pub fn render_class(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, M
     let lay = layout(&diagram, opts);
     let svg = draw(&diagram, &lay, opts);
     let (width_px, height_px) = canvas_size(&diagram, &lay, opts);
-    Ok(MermaidRender {
-        svg,
-        width_px,
-        height_px,
-    })
+    let regions: Vec<HitRegion> = lay
+        .boxes
+        .iter()
+        .map(|b| {
+            let class = &diagram.classes[b.class_idx];
+            HitRegion {
+                id: class.name.clone(),
+                x: b.cx - b.geom.w / 2.0,
+                y: b.cy - b.geom.h / 2.0,
+                w: b.geom.w,
+                h: b.geom.h,
+                link: class.link.clone(),
+                callback: class.callback.clone(),
+                tooltip: class.tooltip.clone(),
+            }
+        })
+        .collect();
+    Ok((
+        MermaidRender {
+            svg,
+            width_px,
+            height_px,
+        },
+        regions,
+    ))
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1927,5 +2121,63 @@ mod tests {
             assert_eq!(c.display_name, c.name);
             assert!(c.annotation.is_none());
         }
+    }
+
+    // ---- click / interaction ----
+
+    #[test]
+    fn click_sets_link_and_tooltip() {
+        let src = "classDiagram\nclass Animal\nclick Animal \"https://x\" \"tip\"\n";
+        let d = parse(src).unwrap();
+        let a = d.classes.iter().find(|c| c.name == "Animal").unwrap();
+        assert_eq!(a.link.as_deref(), Some("https://x"));
+        assert_eq!(a.tooltip.as_deref(), Some("tip"));
+        assert!(a.callback.is_none());
+    }
+
+    #[test]
+    fn click_call_and_unknown_id() {
+        // `call name(args)` → callback; unknown id is skipped, not fabricated.
+        let src = "classDiagram\nclass Animal\nclick Animal call doThing() \"hi\"\nclick Ghost \"https://y\"\n";
+        let d = parse(src).unwrap();
+        assert_eq!(d.classes.len(), 1);
+        let a = &d.classes[0];
+        assert_eq!(a.callback.as_deref(), Some("doThing"));
+        assert_eq!(a.tooltip.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn regions_carry_click_data() {
+        let src = "classDiagram\nclass Animal\nclass Dog\nAnimal <|-- Dog\nclick Animal \"https://x\" \"tip\"\n";
+        let (render, regions) = render_class_with_regions(src, &opts()).unwrap();
+        assert_eq!(regions.len(), 2);
+        let a = regions.iter().find(|r| r.id == "Animal").unwrap();
+        assert_eq!(a.link.as_deref(), Some("https://x"));
+        assert_eq!(a.tooltip.as_deref(), Some("tip"));
+        assert!(a.w > 0.0 && a.h > 0.0);
+        assert!(a.x >= 0.0 && a.y >= 0.0);
+        assert!(a.x + a.w <= render.width_px + 1.0);
+        assert!(a.y + a.h <= render.height_px + 1.0);
+        // Dog has no click.
+        let dog = regions.iter().find(|r| r.id == "Dog").unwrap();
+        assert!(dog.link.is_none() && dog.callback.is_none() && dog.tooltip.is_none());
+    }
+
+    #[test]
+    fn regions_without_click_and_svg_unchanged() {
+        let src = "classDiagram\nclass Animal\nclass Dog\nAnimal <|-- Dog\n";
+        let plain = render_class(src, &opts()).unwrap();
+        let (with_regions, regions) = render_class_with_regions(src, &opts()).unwrap();
+        // Regions per node, all click-free.
+        assert_eq!(regions.len(), 2);
+        assert!(regions.iter().all(|r| r.link.is_none()
+            && r.callback.is_none()
+            && r.tooltip.is_none()
+            && r.w > 0.0
+            && r.h > 0.0));
+        // `render` output byte-identical.
+        assert_eq!(plain.svg, with_regions.svg);
+        assert_eq!(plain.width_px, with_regions.width_px);
+        assert_eq!(plain.height_px, with_regions.height_px);
     }
 }

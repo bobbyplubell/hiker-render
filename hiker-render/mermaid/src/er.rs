@@ -26,7 +26,7 @@ use hiker_graph::{GraphInput, LayeredEngine, LayoutEngine, Vec2};
 
 use crate::model::ElemStyle;
 use crate::svgutil::{edge_label_anchor, escape, opacity_attr, rgb, text_size};
-use crate::{MermaidError, MermaidOptions, MermaidRender};
+use crate::{HitRegion, MermaidError, MermaidOptions, MermaidRender};
 
 // ── Styling directives (classDef / class / style / :::) ───────────────────────
 //
@@ -349,6 +349,12 @@ struct Entity {
     attrs: Vec<Attribute>,
     /// Per-entity style overrides (from `classDef`/`class`/`style`/`:::`).
     style: ElemStyle,
+    /// `click` interaction data: open URL (`link`), host callback name
+    /// (`callback`), and hover `tooltip`. `None` unless a `click` directive
+    /// targeted this entity.
+    link: Option<String>,
+    callback: Option<String>,
+    tooltip: Option<String>,
 }
 
 /// A relationship between two entities.
@@ -417,6 +423,28 @@ fn parse(src: &str) -> Result<ErDiagram, String> {
             continue;
         }
 
+        // Interaction directive: `click <id> ...` (same grammar as flowchart).
+        // Entities are declared elsewhere; an unknown id is skipped, never
+        // fabricated.
+        if line.starts_with("click ") {
+            let rest = line["click".len()..].trim_start();
+            if let Some(c) = parse_click(rest) {
+                if let Some(&i) = index_of.get(&c.id) {
+                    let e = &mut diag.entities[i];
+                    if c.link.is_some() {
+                        e.link = c.link.clone();
+                    }
+                    if c.callback.is_some() {
+                        e.callback = c.callback.clone();
+                    }
+                    if c.tooltip.is_some() {
+                        e.tooltip = c.tooltip.clone();
+                    }
+                }
+            }
+            continue;
+        }
+
         // Entity attribute-block open: `ENTITY {`. An entity name may carry a
         // `:::class` shorthand (`CUSTOMER:::big {`).
         if let Some(name) = line.strip_suffix('{') {
@@ -472,6 +500,126 @@ fn peel_css(tok: &str) -> (String, Option<String>) {
     }
 }
 
+// ── Click directives ──────────────────────────────────────────────────────────
+//
+// Same quote-aware grammar as the flowchart `click` parser (`parse.rs`):
+// - `<id> "<url>" ["<tooltip>"]`             → link (+ tooltip)
+// - `<id> href "<url>" ["<tooltip>"]`        → link (+ tooltip)
+// - `<id> call <name>(<args>) ["<tooltip>"]` → callback = name (args dropped)
+// - `<id> <name>` (bareword)                 → callback = the word
+
+/// A parsed `click` directive body.
+struct ClickDirective {
+    id: String,
+    link: Option<String>,
+    callback: Option<String>,
+    tooltip: Option<String>,
+}
+
+/// A token from a `click` directive body: a bare word or a double-quoted string.
+enum ClickTok {
+    Word(String),
+    Quoted(String),
+}
+
+/// Parse a `click` directive body (everything after the `click` keyword).
+/// Returns `None` if no id is present.
+fn parse_click(rest: &str) -> Option<ClickDirective> {
+    let toks = tokenize_click(rest);
+    let mut it = toks.into_iter();
+    let id = match it.next()? {
+        ClickTok::Word(w) => w,
+        ClickTok::Quoted(_) => return None,
+    };
+    let mut link = None;
+    let mut callback = None;
+    let mut tooltip = None;
+
+    let rest_toks: Vec<ClickTok> = it.collect();
+    let mut i = 0;
+    while i < rest_toks.len() {
+        match &rest_toks[i] {
+            ClickTok::Word(w) if w == "href" => {
+                if let Some(ClickTok::Quoted(u)) = rest_toks.get(i + 1) {
+                    link = Some(u.clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ClickTok::Word(w) if w == "call" => {
+                if let Some(ClickTok::Word(callee)) = rest_toks.get(i + 1) {
+                    let name = callee.split('(').next().unwrap_or(callee).trim();
+                    if !name.is_empty() {
+                        callback = Some(name.to_string());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ClickTok::Word(w) if w == "_blank" || w == "_self" => {
+                i += 1;
+            }
+            ClickTok::Word(w) => {
+                if link.is_none() && callback.is_none() {
+                    let name = w.split('(').next().unwrap_or(w).trim();
+                    if !name.is_empty() {
+                        callback = Some(name.to_string());
+                    }
+                }
+                i += 1;
+            }
+            ClickTok::Quoted(s) => {
+                if link.is_none() && callback.is_none() {
+                    link = Some(s.clone());
+                } else if tooltip.is_none() {
+                    tooltip = Some(s.clone());
+                }
+                i += 1;
+            }
+        }
+    }
+
+    Some(ClickDirective { id, link, callback, tooltip })
+}
+
+/// Split a `click` directive body into quote-aware tokens.
+fn tokenize_click(s: &str) -> Vec<ClickTok> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += 1;
+            }
+            let inner = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            out.push(ClickTok::Quoted(inner.to_string()));
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else {
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'"' {
+                i += 1;
+            }
+            let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            if !word.is_empty() {
+                out.push(ClickTok::Word(word.to_string()));
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Upsert an entity by name, returning its index.
 fn ensure_entity(
     name: &str,
@@ -487,6 +635,9 @@ fn ensure_entity(
         name: name.to_string(),
         attrs: Vec::new(),
         style: ElemStyle::default(),
+        link: None,
+        callback: None,
+        tooltip: None,
     });
     i
 }
@@ -608,6 +759,24 @@ const ROW_H_EM: f32 = 1.5;
 
 /// Render a mermaid `er` diagram to SVG.
 pub fn render_er(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, MermaidError> {
+    Ok(render_er_inner(src, opts)?.0)
+}
+
+/// Like [`render_er`], but also returns one [`HitRegion`] per entity box (its
+/// drawn rect plus any `click` data), in SVG-px coords. Used by
+/// `render_with_regions` to make ER diagrams interactive.
+pub fn render_er_with_regions(
+    src: &str,
+    opts: &MermaidOptions,
+) -> Result<(MermaidRender, Vec<HitRegion>), MermaidError> {
+    render_er_inner(src, opts)
+}
+
+/// Shared pipeline for [`render_er`] / [`render_er_with_regions`].
+fn render_er_inner(
+    src: &str,
+    opts: &MermaidOptions,
+) -> Result<(MermaidRender, Vec<HitRegion>), MermaidError> {
     let diag = parse(src).map_err(MermaidError::Parse)?;
     if diag.entities.is_empty() {
         return Err(MermaidError::Empty);
@@ -719,19 +888,33 @@ pub fn render_er(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
         emit_relationship(&mut svg, &pts, r, index, count, label_pos, opts);
     }
 
+    let mut regions: Vec<HitRegion> = Vec::with_capacity(diag.entities.len());
     for (i, e) in diag.entities.iter().enumerate() {
         let pos = out.positions.get(i).copied().unwrap_or(Vec2::ZERO);
         let (w, h) = sizes[i];
         emit_entity(&mut svg, e, pos.x, pos.y, w, h, opts);
+        regions.push(HitRegion {
+            id: e.name.clone(),
+            x: pos.x - w / 2.0,
+            y: pos.y - h / 2.0,
+            w,
+            h,
+            link: e.link.clone(),
+            callback: e.callback.clone(),
+            tooltip: e.tooltip.clone(),
+        });
     }
 
     svg.push_str("</svg>");
 
-    Ok(MermaidRender {
-        svg,
-        width_px: width,
-        height_px: height,
-    })
+    Ok((
+        MermaidRender {
+            svg,
+            width_px: width,
+            height_px: height,
+        },
+        regions,
+    ))
 }
 
 /// Inter-cell gap between attribute columns, px.
@@ -778,11 +961,9 @@ fn emit_relationship(
     if points.len() < 2 {
         return;
     }
-    let mut d = String::new();
-    for (i, (x, y)) in points.iter().enumerate() {
-        let cmd = if i == 0 { 'M' } else { 'L' };
-        let _ = write!(d, "{cmd}{x:.2},{y:.2} ");
-    }
+    // Smooth curve through the route points (endpoints already clipped to the
+    // entity borders); markers are placed separately from the original points.
+    let d = crate::svgutil::smooth_path_d(points);
     let dash = if rel.dashed {
         " stroke-dasharray=\"4 3\""
     } else {
@@ -1368,5 +1549,52 @@ mod tests {
         for e in &d.entities {
             assert_eq!(e.style, ElemStyle::default());
         }
+    }
+
+    // ---- click / interaction ----
+
+    #[test]
+    fn click_sets_link_and_tooltip() {
+        let src = "erDiagram\n CUSTOMER ||--o{ ORDER : places\n click CUSTOMER \"https://x\" \"tip\"\n";
+        let d = parse(src).unwrap();
+        let c = d.entities.iter().find(|e| e.name == "CUSTOMER").unwrap();
+        assert_eq!(c.link.as_deref(), Some("https://x"));
+        assert_eq!(c.tooltip.as_deref(), Some("tip"));
+        assert!(c.callback.is_none());
+        // Unknown id skipped, not fabricated.
+        let d2 = parse("erDiagram\n CUSTOMER ||--o{ ORDER : places\n click GHOST \"https://y\"\n").unwrap();
+        assert_eq!(d2.entities.len(), 2);
+    }
+
+    #[test]
+    fn regions_carry_click_data() {
+        let src = "erDiagram\n CUSTOMER ||--o{ ORDER : places\n click CUSTOMER \"https://x\" \"tip\"\n";
+        let (render, regions) = render_er_with_regions(src, &opts()).unwrap();
+        assert_eq!(regions.len(), 2);
+        let c = regions.iter().find(|r| r.id == "CUSTOMER").unwrap();
+        assert_eq!(c.link.as_deref(), Some("https://x"));
+        assert_eq!(c.tooltip.as_deref(), Some("tip"));
+        assert!(c.w > 0.0 && c.h > 0.0);
+        assert!(c.x >= 0.0 && c.y >= 0.0);
+        assert!(c.x + c.w <= render.width_px + 1.0);
+        assert!(c.y + c.h <= render.height_px + 1.0);
+        let o = regions.iter().find(|r| r.id == "ORDER").unwrap();
+        assert!(o.link.is_none() && o.callback.is_none() && o.tooltip.is_none());
+    }
+
+    #[test]
+    fn regions_without_click_and_svg_unchanged() {
+        let src = "erDiagram\n CUSTOMER ||--o{ ORDER : places\n";
+        let plain = render_er(src, &opts()).unwrap();
+        let (with_regions, regions) = render_er_with_regions(src, &opts()).unwrap();
+        assert_eq!(regions.len(), 2);
+        assert!(regions.iter().all(|r| r.link.is_none()
+            && r.callback.is_none()
+            && r.tooltip.is_none()
+            && r.w > 0.0
+            && r.h > 0.0));
+        assert_eq!(plain.svg, with_regions.svg);
+        assert_eq!(plain.width_px, with_regions.width_px);
+        assert_eq!(plain.height_px, with_regions.height_px);
     }
 }

@@ -11,15 +11,17 @@
 //! - Statement separators: newlines and `;`. Blank lines ignored. `%% ...`
 //!   comments stripped to end of line.
 //! - Node shapes: `A` / `A[..]` (Rect), `A(..)` (RoundRect), `A([..])` (Stadium),
-//!   `A((..))` (Circle), `A{..}` (Diamond), `A{{..}}` (Hexagon). Labels may be
-//!   `"quoted"`.
+//!   `A((..))` (Circle), `A{..}` (Diamond), `A{{..}}` (Hexagon), plus the
+//!   extended brackets `A[(..)]` (Cylinder), `A[[..]]` (Subroutine),
+//!   `A[/../]`/`A[\..\]` (Parallelogram), `A[/..\]`/`A[\../]` (Trapezoid),
+//!   `A(((..)))` (DoubleCircle), and the mermaid-11 `A@{ shape: .., label: .. }`
+//!   form. Labels may be `"quoted"`.
 //! - Edges: `-->` `---` `<-->`, thick `==>`/`===`, dotted `-.->`/`-.-`, variable
 //!   dash lengths, labels via `-->|text|` and `-- text -->` (and `--- text ---`),
 //!   and chaining `A --> B --> C`.
 //!
-//! Intentionally skipped for v1 (see report): subgraphs, styling/classDef/style,
-//! linkStyle, click/interaction, `&` multi-node refs, accessibility directives,
-//! markdown/`@{...}` shape syntax, and the `o--o`/`x--x` endpoint markers.
+//! Intentionally skipped for v1 (see report): `&` multi-node refs, accessibility
+//! directives, and the `o--o`/`x--x` endpoint markers.
 //!
 //! Policy: **lenient** — unrecognized lines are skipped rather than erroring, so
 //! recovery is per-line. Node label/shape is **last-wins** when a node is
@@ -784,7 +786,25 @@ fn parse_node_ref(bytes: &[u8], pos: &mut usize, dir: &mut Directives) -> Option
 
     // Optional shape group immediately after the id (no space allowed between
     // id and the opening bracket, matching mermaid).
-    let (label, shape) = parse_shape(bytes, pos);
+    let (mut label, mut shape) = parse_shape(bytes, pos);
+
+    // Optional mermaid-11 `@{ shape: …, label: … }` suffix (may appear with no
+    // bracket shape, i.e. directly after the id). Its `shape:`/`label:` override
+    // anything from the bracket form.
+    if starts_with(bytes, *pos, b"@{") {
+        if let Some((at_shape, at_label)) = parse_at_shape(bytes, pos) {
+            if let Some(s) = at_shape {
+                shape = s;
+            }
+            if let Some(l) = at_label {
+                label = Some(l);
+            } else if label.is_none() {
+                // An `@{}` with no `label:` still marks the node as "shaped" so
+                // the id is used as the label (mermaid behavior).
+                label = Some(id.clone());
+            }
+        }
+    }
 
     // Optional `:::className` shorthand (after the id and any shape group).
     // Record the class to apply once classDefs are known.
@@ -813,14 +833,42 @@ fn parse_shape(bytes: &[u8], pos: &mut usize) -> (Option<String>, NodeShape) {
     }
     match bytes[*pos] {
         b'[' => {
-            // Rect: A[..]
-            extract_group(bytes, pos, b"[", b"]").map_or((None, NodeShape::Rect), |t| {
-                (Some(t), NodeShape::Rect)
-            })
+            // Extended bracket shapes (longest-match first so e.g. `[(` beats
+            // `[`): Cylinder `[(..)]`, Subroutine `[[..]]`, and the slant family
+            // `[/../]` `[\..\]` `[/..\]` `[\../]`. Otherwise a plain Rect `[..]`.
+            match bytes.get(*pos + 1) {
+                Some(b'(') => extract_group(bytes, pos, b"[(", b")]")
+                    .map_or((None, NodeShape::Rect), |t| (Some(t), NodeShape::Cylinder)),
+                Some(b'[') => extract_group(bytes, pos, b"[[", b"]]")
+                    .map_or((None, NodeShape::Rect), |t| (Some(t), NodeShape::Subroutine)),
+                // `[/…/]` (Parallelogram) vs `[/…\]` (Trapezoid): same `[/`
+                // opener, disambiguated by the char just before the closing `]`.
+                Some(b'/') => parse_slant_shape(
+                    bytes,
+                    pos,
+                    b"[/",
+                    NodeShape::Parallelogram, // closes with `/]`
+                    NodeShape::Trapezoid,     // closes with `\]`
+                ),
+                // `[\…\]` (ParallelogramAlt) vs `[\…/]` (TrapezoidAlt).
+                Some(b'\\') => parse_slant_shape(
+                    bytes,
+                    pos,
+                    b"[\\",
+                    NodeShape::TrapezoidAlt,     // closes with `/]`
+                    NodeShape::ParallelogramAlt, // closes with `\]`
+                ),
+                _ => extract_group(bytes, pos, b"[", b"]")
+                    .map_or((None, NodeShape::Rect), |t| (Some(t), NodeShape::Rect)),
+            }
         }
         b'(' => {
-            // Stadium A([..]), Circle A((..)), or RoundRect A(..)
-            if peek2(bytes, *pos) == Some((b'(', b'(')) {
+            // DoubleCircle A(((..))), Circle A((..)), Stadium A([..]), or
+            // RoundRect A(..). Longest-match first so `(((` beats `((`.
+            if starts_with(bytes, *pos, b"(((") {
+                extract_group(bytes, pos, b"(((", b")))")
+                    .map_or((None, NodeShape::Rect), |t| (Some(t), NodeShape::DoubleCircle))
+            } else if peek2(bytes, *pos) == Some((b'(', b'(')) {
                 extract_group(bytes, pos, b"((", b"))")
                     .map_or((None, NodeShape::Rect), |t| (Some(t), NodeShape::Circle))
             } else if peek2(bytes, *pos) == Some((b'(', b'[')) {
@@ -842,6 +890,150 @@ fn parse_shape(bytes: &[u8], pos: &mut usize) -> (Option<String>, NodeShape) {
             }
         }
         _ => (None, NodeShape::Rect),
+    }
+}
+
+/// Parse a slant-bracket shape sharing the opener `open` (`[/` or `[\`). Both
+/// the parallelogram and trapezoid variants open the same way; the closing
+/// delimiter (`/]` vs `\]`) decides which. We scan quote-aware to the matching
+/// `]` and inspect the char immediately before it: `/` → `if_slash`, `\` →
+/// `if_back`. On a missing/ambiguous close, leaves `pos` unchanged → Rect.
+fn parse_slant_shape(
+    bytes: &[u8],
+    pos: &mut usize,
+    open: &[u8],
+    if_slash: NodeShape,
+    if_back: NodeShape,
+) -> (Option<String>, NodeShape) {
+    debug_assert!(starts_with(bytes, *pos, open));
+    let inner_start = *pos + open.len();
+    let mut i = inner_start;
+    let mut in_quotes = false;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            in_quotes = !in_quotes;
+            i += 1;
+            continue;
+        }
+        // The close is a `]` preceded (outside quotes) by `/` or `\`. The slant
+        // char sits at i-1 and the `]` at i; the inner label is everything up to
+        // that slant char.
+        if !in_quotes && bytes[i] == b']' && i > inner_start {
+            let close = bytes[i - 1];
+            let shape = match close {
+                b'/' => if_slash,
+                b'\\' => if_back,
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let inner = match std::str::from_utf8(&bytes[inner_start..i - 1]) {
+                Ok(s) => clean_label(s),
+                Err(_) => return (None, NodeShape::Rect),
+            };
+            *pos = i + 1;
+            return (Some(inner), shape);
+        }
+        i += 1;
+    }
+    (None, NodeShape::Rect)
+}
+
+/// Parse a mermaid-11 `@{ key: value, … }` node suffix starting at `pos` (which
+/// must point at `@{`). Advances `pos` past the closing `}`. Returns
+/// `(shape, label)` where `shape`/`label` are `Some` if those keys were present.
+/// Quote-aware on values; unknown keys (e.g. `icon:`) are ignored. On a missing
+/// `}`, leaves `pos` unchanged and returns `None`.
+fn parse_at_shape(bytes: &[u8], pos: &mut usize) -> Option<(Option<NodeShape>, Option<String>)> {
+    let saved = *pos;
+    // Skip `@{`.
+    let mut i = *pos + 2;
+    let inner_start = i;
+    let mut in_quotes = false;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            in_quotes = !in_quotes;
+        } else if !in_quotes && bytes[i] == b'}' {
+            break;
+        }
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'}' {
+        *pos = saved;
+        return None;
+    }
+    let inner = std::str::from_utf8(&bytes[inner_start..i]).ok()?;
+    *pos = i + 1;
+
+    let mut shape: Option<NodeShape> = None;
+    let mut label: Option<String> = None;
+    for (key, val) in split_kv_pairs(inner) {
+        match key.as_str() {
+            "shape" => shape = Some(shape_from_name(&val)),
+            "label" | "title" => label = Some(val),
+            _ => {} // icon:, etc. — ignored
+        }
+    }
+    Some((shape, label))
+}
+
+/// Split a quote-aware comma-separated `key: value` list (the body of an `@{ … }`
+/// group). Values may be double-quoted (quotes stripped). Pairs without a `:` are
+/// skipped.
+fn split_kv_pairs(inner: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    let mut start = 0;
+    let mut in_quotes = false;
+    // Split on top-level commas (quote-aware), then split each part on its first
+    // `:`.
+    let mut parts: Vec<&str> = Vec::new();
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_quotes = !in_quotes,
+            b',' if !in_quotes => {
+                parts.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&inner[start..]);
+
+    for part in parts {
+        if let Some((k, v)) = part.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            out.push((key, clean_label(v)));
+        }
+    }
+    out
+}
+
+/// Map a mermaid shape name (or one of its aliases) to a [`NodeShape`]. Unknown
+/// names fall back to `Rect`.
+fn shape_from_name(name: &str) -> NodeShape {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "cyl" | "cylinder" | "das" | "database" | "db" => NodeShape::Cylinder,
+        "subproc" | "subroutine" | "fr-rect" | "framed-rectangle" => NodeShape::Subroutine,
+        "doc" | "document" => NodeShape::Document,
+        "lean-r" | "lean-right" | "in-out" | "parallelogram" => NodeShape::Parallelogram,
+        "lean-l" | "lean-left" | "out-in" => NodeShape::ParallelogramAlt,
+        "trap-b" | "trapezoid" | "trapezoid-bottom" | "priority" => NodeShape::Trapezoid,
+        "trap-t" | "trapezoid-top" | "manual-input" => NodeShape::TrapezoidAlt,
+        "dbl-circ" | "double-circle" => NodeShape::DoubleCircle,
+        "rect" | "rectangle" | "process" => NodeShape::Rect,
+        "rounded" => NodeShape::RoundRect,
+        "stadium" | "pill" => NodeShape::Stadium,
+        "circle" | "circ" => NodeShape::Circle,
+        "diam" | "diamond" | "decision" => NodeShape::Diamond,
+        "hex" | "hexagon" => NodeShape::Hexagon,
+        _ => NodeShape::Rect, // unknown → Rect
     }
 }
 
@@ -1158,6 +1350,77 @@ mod tests {
         assert_eq!(node(&c, "E").label, "diam");
         assert_eq!(node(&c, "F").shape, NodeShape::Hexagon);
         assert_eq!(node(&c, "F").label, "hex");
+    }
+
+    #[test]
+    fn extended_bracket_shapes() {
+        let c = parse(
+            "graph TD\n\
+             A[(DB)]\n\
+             B[[Sub]]\n\
+             C[/Para/]\n\
+             D[\\ParaAlt\\]\n\
+             E[/Trap\\]\n\
+             F[\\TrapAlt/]\n\
+             G(((Dbl)))",
+        );
+        assert_eq!(node(&c, "A").shape, NodeShape::Cylinder);
+        assert_eq!(node(&c, "A").label, "DB");
+        assert_eq!(node(&c, "B").shape, NodeShape::Subroutine);
+        assert_eq!(node(&c, "B").label, "Sub");
+        assert_eq!(node(&c, "C").shape, NodeShape::Parallelogram);
+        assert_eq!(node(&c, "C").label, "Para");
+        assert_eq!(node(&c, "D").shape, NodeShape::ParallelogramAlt);
+        assert_eq!(node(&c, "D").label, "ParaAlt");
+        assert_eq!(node(&c, "E").shape, NodeShape::Trapezoid);
+        assert_eq!(node(&c, "E").label, "Trap");
+        assert_eq!(node(&c, "F").shape, NodeShape::TrapezoidAlt);
+        assert_eq!(node(&c, "F").label, "TrapAlt");
+        assert_eq!(node(&c, "G").shape, NodeShape::DoubleCircle);
+        assert_eq!(node(&c, "G").label, "Dbl");
+    }
+
+    #[test]
+    fn at_shape_syntax_sets_shape_and_label() {
+        let c = parse("graph TD\nX@{ shape: cylinder, label: \"DB\" }");
+        assert_eq!(node(&c, "X").shape, NodeShape::Cylinder);
+        assert_eq!(node(&c, "X").label, "DB");
+    }
+
+    #[test]
+    fn at_shape_aliases_and_unknown() {
+        let c = parse(
+            "graph TD\n\
+             A@{ shape: doc }\n\
+             B@{ shape: lean-l }\n\
+             C@{ shape: trap-t }\n\
+             D@{ shape: dbl-circ }\n\
+             E@{ shape: nope }",
+        );
+        assert_eq!(node(&c, "A").shape, NodeShape::Document);
+        assert_eq!(node(&c, "B").shape, NodeShape::ParallelogramAlt);
+        assert_eq!(node(&c, "C").shape, NodeShape::TrapezoidAlt);
+        assert_eq!(node(&c, "D").shape, NodeShape::DoubleCircle);
+        // Unknown shape name falls back to Rect.
+        assert_eq!(node(&c, "E").shape, NodeShape::Rect);
+        // No label given → label is the id.
+        assert_eq!(node(&c, "A").label, "A");
+    }
+
+    #[test]
+    fn at_shape_label_overrides_bracket() {
+        // `@{ label: }` wins over a preceding bracket label.
+        let c = parse("graph TD\nA[old]@{ shape: stadium, label: new }");
+        assert_eq!(node(&c, "A").shape, NodeShape::Stadium);
+        assert_eq!(node(&c, "A").label, "new");
+    }
+
+    #[test]
+    fn at_shape_node_participates_in_edges() {
+        let c = parse("graph LR\nA@{ shape: cylinder } --> B");
+        assert_eq!(node(&c, "A").shape, NodeShape::Cylinder);
+        assert_eq!(c.edges.len(), 1);
+        assert_eq!((c.edges[0].from.as_str(), c.edges[0].to.as_str()), ("A", "B"));
     }
 
     #[test]

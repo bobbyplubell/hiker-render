@@ -738,11 +738,9 @@ fn emit_relationship(
     if points.len() < 2 {
         return;
     }
-    let mut d = String::new();
-    for (i, (x, y)) in points.iter().enumerate() {
-        let cmd = if i == 0 { 'M' } else { 'L' };
-        let _ = write!(d, "{cmd}{x:.2},{y:.2} ");
-    }
+    // Smooth curve through the route points; the open arrowhead is drawn
+    // separately from the original points so it still lands on the border.
+    let d = crate::svgutil::smooth_path_d(points);
     let _ = write!(
         svg,
         "<path d=\"{}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"1.5\"{so}/>",
