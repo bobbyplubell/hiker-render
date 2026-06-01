@@ -9,7 +9,7 @@
 
 use super::graph::{Edge, Graph, GraphOptions};
 use super::layout;
-use super::types::{DagreGraph, EdgeLabel, GraphLabel, NodeLabel, RankDir};
+use super::types::{DagreGraph, EdgeLabel, GraphLabel, LabelPos, NodeLabel, RankDir};
 use crate::{GraphInput, LayoutEngine, LayoutOutput, Vec2};
 
 /// Dagre layered (Sugiyama) layout behind the [`LayoutEngine`] trait.
@@ -51,6 +51,7 @@ impl LayoutEngine for LayeredEngine {
             return LayoutOutput {
                 positions: Vec::new(),
                 edge_routes: Vec::new(),
+                edge_label_positions: Vec::new(),
                 size: Vec2::ZERO,
             };
         }
@@ -98,12 +99,23 @@ impl LayoutEngine for LayeredEngine {
         let mut edge_objs: Vec<Edge> = Vec::with_capacity(input.edges.len());
         for (idx, &(v, w)) in input.edges.iter().enumerate() {
             let name = idx.to_string();
-            g.set_edge(
-                v.to_string(),
-                w.to_string(),
-                EdgeLabel::default(),
-                Some(&name),
-            );
+            // When a label size is supplied, set the edge label's width/height
+            // (centered) so dagre reserves a gap for it between ranks and
+            // positions it (an edge-label dummy that gets ordered apart from
+            // siblings — which separates bidirectional/parallel labels).
+            let label = match input.edge_label_sizes {
+                Some(sizes) => match sizes.get(idx).copied().flatten() {
+                    Some(sz) if sz.x > 0.0 && sz.y > 0.0 => EdgeLabel {
+                        width: Some(sz.x as f64),
+                        height: Some(sz.y as f64),
+                        label_pos: Some(LabelPos::C),
+                        ..Default::default()
+                    },
+                    _ => EdgeLabel::default(),
+                },
+                None => EdgeLabel::default(),
+            };
+            g.set_edge(v.to_string(), w.to_string(), label, Some(&name));
             edge_objs.push(Edge::new(v.to_string(), w.to_string(), Some(name)));
         }
 
@@ -136,6 +148,18 @@ impl LayoutEngine for LayeredEngine {
             })
             .collect();
 
+        // Read back where dagre placed each edge's label (its center), when the
+        // edge had a label size. Aligned to `input.edges` order.
+        let edge_label_positions: Vec<Option<Vec2>> = edge_objs
+            .iter()
+            .map(|e| {
+                g.edge_by_obj(e).and_then(|el| match (el.x, el.y) {
+                    (Some(x), Some(y)) => Some(Vec2::new(x as f32, y as f32)),
+                    _ => None,
+                })
+            })
+            .collect();
+
         let size = g
             .graph()
             .map(|gl| {
@@ -149,6 +173,7 @@ impl LayoutEngine for LayeredEngine {
         LayoutOutput {
             positions,
             edge_routes,
+            edge_label_positions,
             size,
         }
     }
@@ -177,6 +202,7 @@ mod tests {
             node_count: 3,
             edges: &edges,
             node_sizes: None,
+            edge_label_sizes: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);
@@ -198,6 +224,7 @@ mod tests {
             node_count: 4,
             edges: &edges,
             node_sizes: None,
+            edge_label_sizes: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);
@@ -216,6 +243,7 @@ mod tests {
             node_count: 0,
             edges: &[],
             node_sizes: None,
+            edge_label_sizes: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);
@@ -231,6 +259,7 @@ mod tests {
             node_count: 4,
             edges: &edges,
             node_sizes: None,
+            edge_label_sizes: None,
             directed: true,
         };
         let eng = LayeredEngine::default();
@@ -252,6 +281,7 @@ mod tests {
             node_count: 2,
             edges: &edges,
             node_sizes: Some(&sizes),
+            edge_label_sizes: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);
@@ -268,6 +298,7 @@ mod tests {
             node_count: 2,
             edges: &edges,
             node_sizes: None,
+            edge_label_sizes: None,
             directed: true,
         };
         let out = LayeredEngine::default().layout(&input);

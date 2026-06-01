@@ -38,12 +38,19 @@ pub fn layout_flowchart(
     // the edges we pass in).
     let mut edges: Vec<(u32, u32)> = Vec::with_capacity(chart.edges.len());
     let mut kept: Vec<usize> = Vec::with_capacity(chart.edges.len());
+    // Per-edge label box size, aligned to `edges`, so dagre reserves a gap and
+    // positions the label there (None for unlabeled edges).
+    let mut label_sizes: Vec<Option<Vec2>> = Vec::with_capacity(chart.edges.len());
     for (j, e) in chart.edges.iter().enumerate() {
         if let (Some(&from), Some(&to)) =
             (index_of.get(e.from.as_str()), index_of.get(e.to.as_str()))
         {
             edges.push((from, to));
             kept.push(j);
+            label_sizes.push(e.label.as_deref().map(|l| {
+                let (w, h) = crate::svgutil::text_size(l, opts.font_size_px);
+                Vec2::new(w + 10.0, h + 6.0)
+            }));
         }
     }
 
@@ -66,6 +73,7 @@ pub fn layout_flowchart(
         node_count: chart.nodes.len(),
         edges: &edges,
         node_sizes: Some(&node_sizes),
+        edge_label_sizes: Some(&label_sizes),
         directed: true,
     });
 
@@ -84,9 +92,28 @@ pub fn layout_flowchart(
                 cy: pos.y,
                 w,
                 h,
+                style: chart.nodes[i].style.clone(),
             }
         })
         .collect();
+
+    // Group kept dagre edges by their unordered endpoint-index pair so that
+    // parallel / bidirectional edges between the same node pair spread their
+    // labels perpendicular to the route instead of stacking at one midpoint.
+    // `group[k]` = (index within group, group size) for kept edge k.
+    let mut pair_members: std::collections::HashMap<(u32, u32), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (k, &(a, b)) in edges.iter().enumerate() {
+        let key = (a.min(b), a.max(b));
+        pair_members.entry(key).or_default().push(k);
+    }
+    let mut group = vec![(0usize, 1usize); edges.len()];
+    for members in pair_members.values() {
+        let cnt = members.len();
+        for (idx, &k) in members.iter().enumerate() {
+            group[k] = (idx, cnt);
+        }
+    }
 
     let edges_out: Vec<PositionedEdge> = kept
         .iter()
@@ -98,8 +125,14 @@ pub fn layout_flowchart(
                 .get(dagre_idx)
                 .map(|r| r.iter().map(|p| (p.x, p.y)).collect())
                 .unwrap_or_default();
+            let (idx, cnt) = group[dagre_idx];
             let label_pos = if e.label.is_some() {
-                polyline_midpoint(&points)
+                // Prefer dagre's reserved label center; fall back to the
+                // perpendicular-nudged midpoint when dagre didn't place it.
+                match out.edge_label_positions.get(dagre_idx).copied().flatten() {
+                    Some(p) => Some((p.x, p.y)),
+                    None => crate::svgutil::edge_label_anchor(&points, idx, cnt, opts.font_size_px),
+                }
             } else {
                 None
             };
@@ -110,6 +143,7 @@ pub fn layout_flowchart(
                 kind: e.kind,
                 arrow_start: e.arrow_start,
                 arrow_end: e.arrow_end,
+                style: e.style.clone(),
             }
         })
         .collect();
@@ -122,44 +156,6 @@ pub fn layout_flowchart(
     }
 }
 
-/// The point at half the polyline's cumulative arc length. `None` for an empty
-/// polyline; the single point for a 1-point polyline.
-fn polyline_midpoint(points: &[(f32, f32)]) -> Option<(f32, f32)> {
-    match points.len() {
-        0 => None,
-        1 => Some(points[0]),
-        _ => {
-            let total: f32 = points
-                .windows(2)
-                .map(|w| dist(w[0], w[1]))
-                .sum();
-            if total <= 0.0 {
-                return Some(points[0]);
-            }
-            let half = total / 2.0;
-            let mut acc = 0.0;
-            for w in points.windows(2) {
-                let seg = dist(w[0], w[1]);
-                if acc + seg >= half {
-                    let t = if seg > 0.0 { (half - acc) / seg } else { 0.0 };
-                    return Some((
-                        w[0].0 + (w[1].0 - w[0].0) * t,
-                        w[0].1 + (w[1].1 - w[0].1) * t,
-                    ));
-                }
-                acc += seg;
-            }
-            Some(*points.last().unwrap())
-        }
-    }
-}
-
-fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
-    let dx = b.0 - a.0;
-    let dy = b.1 - a.1;
-    (dx * dx + dy * dy).sqrt()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +166,7 @@ mod tests {
             id: id.to_string(),
             label: id.to_string(),
             shape: NodeShape::Rect,
+            style: Default::default(),
         }
     }
 
@@ -181,6 +178,7 @@ mod tests {
             kind: EdgeKind::Normal,
             arrow_start: false,
             arrow_end: true,
+            style: Default::default(),
         }
     }
 
@@ -288,6 +286,7 @@ mod tests {
             kind: EdgeKind::Normal,
             arrow_start: false,
             arrow_end: true,
+            style: Default::default(),
         };
         let chart = FlowChart {
             direction: Direction::TopDown,
@@ -305,6 +304,40 @@ mod tests {
         let sizes = sizes_for(&chain);
         let d2 = layout_flowchart(&chain, &sizes, &opts());
         assert!(d2.edges.iter().all(|e| e.label_pos.is_none()));
+    }
+
+    #[test]
+    fn bidirectional_labels_separated() {
+        // a→b and b→a both labeled: their label anchors must not coincide.
+        let ab = FlowEdge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+            label: Some("go".to_string()),
+            kind: EdgeKind::Normal,
+            arrow_start: false,
+            arrow_end: true,
+            style: Default::default(),
+        };
+        let ba = FlowEdge {
+            from: "b".to_string(),
+            to: "a".to_string(),
+            label: Some("back".to_string()),
+            kind: EdgeKind::Normal,
+            arrow_start: false,
+            arrow_end: true,
+            style: Default::default(),
+        };
+        let chart = FlowChart {
+            direction: Direction::TopDown,
+            nodes: vec![node("a"), node("b")],
+            edges: vec![ab, ba],
+        };
+        let sizes = sizes_for(&chart);
+        let d = layout_flowchart(&chart, &sizes, &opts());
+        assert_eq!(d.edges.len(), 2);
+        let p0 = d.edges[0].label_pos.expect("edge 0 label_pos");
+        let p1 = d.edges[1].label_pos.expect("edge 1 label_pos");
+        assert_ne!(p0, p1, "bidirectional labels must be at distinct anchors");
     }
 
     #[test]

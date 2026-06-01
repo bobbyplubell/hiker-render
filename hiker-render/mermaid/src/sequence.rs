@@ -293,8 +293,9 @@ const BOX_PAD_X: f32 = 12.0;
 const MIN_BOX_W: f32 = 40.0;
 /// Horizontal gap between adjacent participant boxes, px.
 const COL_GAP: f32 = 40.0;
-/// Vertical gap between consecutive message rows, px.
-const MESSAGE_GAP: f32 = 40.0;
+/// Vertical gap between consecutive message rows, px. A little roomy so a
+/// message's lifted text label clears the line above it.
+const MESSAGE_GAP: f32 = 46.0;
 /// Gap between the participant boxes and the first message row, px.
 const TOP_GAP: f32 = 30.0;
 /// Width of a self-message loop, px.
@@ -478,10 +479,11 @@ fn emit_message(svg: &mut String, x_from: f32, x_to: f32, y: f32, m: &Message, o
         ArrowStyle::Filled => {}
     }
 
-    // Text centered above the line.
+    // Text centered clearly above the line (lift it so descenders clear the
+    // line, not sitting on top of it).
     if !m.text.is_empty() {
         let cx = (x_from + x_to) / 2.0;
-        let ty = y - opts.font_size_px * 0.4;
+        let ty = y - (opts.font_size_px * 0.4 + 3.0);
         emit_text(svg, &m.text, cx, ty, opts);
     }
 }

@@ -27,6 +27,25 @@ enum Group {
     Flowchart,
     Pie,
     Sequence,
+    State,
+    Er,
+    Class,
+    Mindmap,
+    Gantt,
+    Journey,
+    Quadrant,
+    Requirement,
+    GitGraph,
+    XyChart,
+    Radar,
+    Timeline,
+    Kanban,
+    Sankey,
+    Treemap,
+    C4,
+    Packet,
+    Block,
+    Venn,
 }
 
 impl Group {
@@ -35,6 +54,25 @@ impl Group {
             Group::Flowchart => "Flowchart",
             Group::Pie => "Pie",
             Group::Sequence => "Sequence",
+            Group::State => "State",
+            Group::Er => "ER",
+            Group::Class => "Class",
+            Group::Mindmap => "Mindmap",
+            Group::Gantt => "Gantt",
+            Group::Journey => "Journey",
+            Group::Quadrant => "Quadrant",
+            Group::Requirement => "Requirement",
+            Group::GitGraph => "Git",
+            Group::XyChart => "XY Chart",
+            Group::Radar => "Radar",
+            Group::Timeline => "Timeline",
+            Group::Kanban => "Kanban",
+            Group::Sankey => "Sankey",
+            Group::Treemap => "Treemap",
+            Group::C4 => "C4",
+            Group::Packet => "Packet",
+            Group::Block => "Block",
+            Group::Venn => "Venn",
         }
     }
 }
@@ -48,29 +86,119 @@ fn examples() -> Vec<Example> {
             src: "graph TD; A[Start]-->B{OK?}; B-->|yes|C(Done); B-->|no|A",
         },
         Example {
-            name: "Pipeline LR",
-            group: Group::Flowchart,
-            src: "graph LR; A([Input]) --> B{Valid?}; B -->|yes| C[Process]; B -->|no| D[Reject]; C --> E((End)); D --> E",
-        },
-        Example {
-            name: "Chain",
-            group: Group::Flowchart,
-            src: "graph TD; A[Start] --> B[Load config]; B --> C[Run]; C --> D[Done]",
-        },
-        Example {
             name: "Pets",
             group: Group::Pie,
             src: "pie showData title Pet ownership\n    \"Dogs\" : 386\n    \"Cats\" : 85\n    \"Rats\" : 15",
         },
         Example {
-            name: "Languages",
-            group: Group::Pie,
-            src: "pie title Favorite languages\n    \"Rust\" : 55\n    \"Python\" : 30\n    \"Go\" : 15",
-        },
-        Example {
             name: "Greeting",
             group: Group::Sequence,
             src: "sequenceDiagram\n    participant A as Alice\n    participant B as Bob\n    A->>B: Hello Bob\n    B-->>A: Hi Alice\n    A->>B: How are you?\n    B->>B: thinking\n    B-->>A: Great!",
+        },
+        Example {
+            name: "Lifecycle",
+            group: Group::State,
+            src: "stateDiagram-v2\n    [*] --> Idle\n    Idle --> Running : start\n    Running --> Idle : stop\n    Running --> [*] : exit",
+        },
+        Example {
+            name: "Orders",
+            group: Group::Er,
+            src: "erDiagram\n    CUSTOMER ||--o{ ORDER : places\n    ORDER ||--|{ LINE_ITEM : contains\n    CUSTOMER }|..|{ ADDRESS : uses",
+        },
+        Example {
+            name: "Animals",
+            group: Group::Class,
+            src: "classDiagram\n    Animal <|-- Dog\n    Animal <|-- Cat\n    class Animal {\n      +int age\n      +String name\n      +eat() void\n    }\n    class Dog {\n      +bark() void\n    }",
+        },
+        Example {
+            name: "Topics",
+            group: Group::Mindmap,
+            src: "mindmap\n  root((mermaid))\n    Origins\n      Long history\n    Uses\n      Docs\n      Diagrams\n    Tools\n      Editor",
+        },
+        Example {
+            name: "Project",
+            group: Group::Gantt,
+            src: "gantt\n    title Project\n    dateFormat YYYY-MM-DD\n    section Design\n    Spec :done, a1, 2024-01-01, 5d\n    Mockups :active, a2, after a1, 4d\n    section Build\n    Code :a3, after a2, 8d\n    Launch :milestone, m1, after a3, 0d",
+        },
+        Example {
+            name: "Online shopping",
+            group: Group::Journey,
+            src: "journey
+    title Online shopping experience
+    section Browse
+      Visit store: 5: Customer
+      Search product: 3: Customer
+    section Buy
+      Add to cart: 4: Customer
+      Checkout: 2: Customer
+    section After
+      Track order: 3: Customer
+      Receive item: 5: Customer",
+        },
+        Example {
+            name: "Reach vs Effort",
+            group: Group::Quadrant,
+            src: "quadrantChart\n    title Reach vs Effort\n    x-axis Low Effort --> High Effort\n    y-axis Low Reach --> High Reach\n    quadrant-1 Do now\n    quadrant-2 Plan\n    quadrant-3 Skip\n    quadrant-4 Maybe\n    Campaign A: [0.3, 0.6]\n    Campaign B: [0.45, 0.23]\n    Campaign C: [0.57, 0.69]",
+        },
+        Example {
+            name: "Satisfies",
+            group: Group::Requirement,
+            src: "requirementDiagram\n    requirement test_req {\n      id: 1\n      text: the system shall work\n      risk: high\n      verifymethod: test\n    }\n    element test_entity {\n      type: simulation\n    }\n    test_entity - satisfies -> test_req",
+        },
+        Example {
+            name: "Branch & merge",
+            group: Group::GitGraph,
+            src: "gitGraph\n    commit id: \"init\"\n    branch dev\n    checkout dev\n    commit\n    commit tag: \"v1\"\n    checkout main\n    merge dev\n    commit",
+        },
+        Example {
+            name: "Revenue",
+            group: Group::XyChart,
+            src: "xychart-beta\n    title Monthly revenue\n    x-axis [Jan, Feb, Mar, Apr, May]\n    y-axis Revenue 0 --> 100\n    bar [30, 55, 40, 80, 65]\n    line [20, 45, 50, 70, 60]",
+        },
+        Example {
+            name: "Skills",
+            group: Group::Radar,
+            src: "radar-beta\n    title Skills\n    axis a[\"Speed\"], b[\"Power\"], c[\"Range\"], d[\"Defense\"], e[\"Magic\"]\n    curve hero{ 80, 60, 70, 50, 90 }\n    curve rival{ 50, 90, 40, 80, 30 }\n    max 100",
+        },
+        Example {
+            name: "History of the web",
+            group: Group::Timeline,
+            src: "timeline\n    title History of the web\n    section Early\n    1990 : Tim invents the web\n    1993 : Mosaic browser\n    section Growth\n    1995 : JavaScript : PHP\n    2004 : Web 2.0",
+        },
+        Example {
+            name: "Board",
+            group: Group::Kanban,
+            src: "kanban\n    Todo\n      Write spec\n      Draft API\n    In Progress\n      Build parser\n    Done\n      Set up repo\n      CI pipeline",
+        },
+        Example {
+            name: "Energy",
+            group: Group::Sankey,
+            src: "sankey-beta\nCoal,Electricity,25\nGas,Electricity,15\nElectricity,Homes,20\nElectricity,Industry,20\nGas,Heating,10",
+        },
+        Example {
+            name: "Storage",
+            group: Group::Treemap,
+            src: "treemap-beta\ntitle Storage\n\"Media\"\n    \"Photos\": 40\n    \"Video\": 80\n\"Docs\"\n    \"Work\": 30\n    \"Personal\": 15\n\"Apps\": 25",
+        },
+        Example {
+            name: "Banking",
+            group: Group::C4,
+            src: "C4Context\n    Person(user, \"Customer\", \"A bank customer\")\n    System(bank, \"Online Banking\", \"Lets customers view accounts\")\n    System_Ext(email, \"Email System\", \"Sends emails\")\n    Rel(user, bank, \"Uses\")\n    Rel(bank, email, \"Sends mail via\")",
+        },
+        Example {
+            name: "TCP header",
+            group: Group::Packet,
+            src: "packet-beta\ntitle TCP header\n0-15: \"Source Port\"\n16-31: \"Destination Port\"\n32-63: \"Sequence Number\"\n64-95: \"Acknowledgment Number\"",
+        },
+        Example {
+            name: "Services",
+            group: Group::Block,
+            src: "block-beta\n    columns 3\n    a[\"Frontend\"] b[\"API\"] c[\"Database\"]\n    a --> b\n    b --> c",
+        },
+        Example {
+            name: "Hobbies",
+            group: Group::Venn,
+            src: "venn\n    title Hobbies\n    set \"Music\": Alice, Bob, Carol\n    set \"Sports\": Bob, Carol, Dave\n    set \"Art\": Carol, Eve",
         },
     ]
 }
@@ -151,7 +279,15 @@ impl eframe::App for GalleryApp {
                 ui.heading("Examples");
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for group in [Group::Flowchart, Group::Pie, Group::Sequence] {
+                    // All groups present in the example set, in first-appearance
+                    // order — so every diagram type shows up automatically.
+                    let mut groups: Vec<Group> = Vec::new();
+                    for ex in &self.examples {
+                        if !groups.contains(&ex.group) {
+                            groups.push(ex.group);
+                        }
+                    }
+                    for group in groups {
                         ui.label(egui::RichText::new(group.label()).strong());
                         for (i, ex) in self.examples.iter().enumerate() {
                             if ex.group != group {

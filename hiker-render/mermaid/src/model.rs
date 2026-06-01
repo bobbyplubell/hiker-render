@@ -38,6 +38,22 @@ pub enum NodeShape {
     Hexagon,
 }
 
+/// Per-element style overrides from `classDef` / `class` / `style` / `linkStyle`
+/// directives. Any `None` field falls back to the theme/options default.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ElemStyle {
+    /// Fill color (RGBA).
+    pub fill: Option<[u8; 4]>,
+    /// Stroke / border color (RGBA).
+    pub stroke: Option<[u8; 4]>,
+    /// Stroke width in px.
+    pub stroke_width: Option<f32>,
+    /// Label text color (RGBA) — `color:` in a classDef.
+    pub text_color: Option<[u8; 4]>,
+    /// Dashed stroke (e.g. `stroke-dasharray`).
+    pub dashed: bool,
+}
+
 /// A flowchart node. `id` is the source identifier (used for edge endpoints and
 /// dagre node ids); `label` is the display text (defaults to `id`).
 #[derive(Clone, Debug)]
@@ -45,6 +61,8 @@ pub struct FlowNode {
     pub id: String,
     pub label: String,
     pub shape: NodeShape,
+    /// Per-node style overrides (from `classDef`/`class`/`style`).
+    pub style: ElemStyle,
 }
 
 /// Edge line style.
@@ -71,6 +89,8 @@ pub struct FlowEdge {
     pub arrow_start: bool,
     /// Arrowhead at the `to` end (e.g. `A --> B`; false for `A --- B`).
     pub arrow_end: bool,
+    /// Per-edge style overrides (from `linkStyle`).
+    pub style: ElemStyle,
 }
 
 /// A parsed flowchart. `nodes` is in first-seen (insertion) order.
@@ -95,6 +115,8 @@ pub struct PositionedNode {
     /// Box width/height.
     pub w: f32,
     pub h: f32,
+    /// Per-node style overrides (resolved from the FlowNode).
+    pub style: ElemStyle,
 }
 
 /// A routed edge: a polyline through `points` (already clipped to node borders),
@@ -109,6 +131,8 @@ pub struct PositionedEdge {
     pub kind: EdgeKind,
     pub arrow_start: bool,
     pub arrow_end: bool,
+    /// Per-edge style overrides (resolved from the FlowEdge).
+    pub style: ElemStyle,
 }
 
 /// The laid-out diagram in a 0-origin coordinate space of size `width`×`height`.

@@ -327,7 +327,8 @@ mod tests {
             cy,
             w: 60.0,
             h: 30.0,
-        }
+                style: Default::default(),
+            }
     }
 
     fn small_diagram() -> PositionedDiagram {
@@ -343,6 +344,7 @@ mod tests {
                 kind: EdgeKind::Normal,
                 arrow_start: false,
                 arrow_end: true,
+                style: Default::default(),
             }],
             width: 100.0,
             height: 150.0,

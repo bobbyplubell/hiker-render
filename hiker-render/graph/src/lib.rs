@@ -43,6 +43,12 @@ pub struct GraphInput<'a> {
     pub node_count: usize,
     pub edges: &'a [(u32, u32)],
     pub node_sizes: Option<&'a [Vec2]>,
+    /// Optional per-edge label box sizes (same order/length as `edges`;
+    /// `None` for an unlabeled edge). A size-aware layered engine reserves
+    /// space for these labels between ranks (so they don't overlap nodes or
+    /// each other) and reports where it placed them via
+    /// [`LayoutOutput::edge_label_positions`]. Point engines ignore this.
+    pub edge_label_sizes: Option<&'a [Option<Vec2>]>,
     pub directed: bool,
 }
 
@@ -52,6 +58,11 @@ pub struct GraphInput<'a> {
 pub struct LayoutOutput {
     pub positions: Vec<Vec2>,
     pub edge_routes: Vec<Vec<Vec2>>,
+    /// Where the engine placed each edge's label (its center), aligned to the
+    /// input `edges` order. `Some` only for edges that had a size in
+    /// [`GraphInput::edge_label_sizes`] and were positioned; `None` otherwise.
+    /// Empty when the engine doesn't place edge labels.
+    pub edge_label_positions: Vec<Option<Vec2>>,
     pub size: Vec2,
 }
 
@@ -107,6 +118,7 @@ impl LayoutEngine for ForceEngine {
         LayoutOutput {
             positions,
             edge_routes: Vec::new(),
+            edge_label_positions: Vec::new(),
             size,
         }
     }
@@ -149,6 +161,7 @@ impl LayoutEngine for TreeEngine {
         LayoutOutput {
             positions,
             edge_routes: Vec::new(),
+            edge_label_positions: Vec::new(),
             size,
         }
     }

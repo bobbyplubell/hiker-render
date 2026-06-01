@@ -26,7 +26,25 @@
 //! redefined. A node referenced before being shaped defaults to `Rect` with
 //! `label == id`.
 
-use crate::model::{Direction, EdgeKind, FlowChart, FlowEdge, FlowNode, NodeShape};
+use crate::model::{Direction, EdgeKind, ElemStyle, FlowChart, FlowEdge, FlowNode, NodeShape};
+use std::collections::HashMap;
+
+/// Directive state collected during parsing, resolved onto nodes/edges at the
+/// end of `parse_flowchart` (two-pass: classDefs may be defined after the
+/// `class`/`:::` statements that reference them).
+#[derive(Default)]
+struct Directives {
+    /// Named `classDef` styles.
+    class_defs: HashMap<String, ElemStyle>,
+    /// `(node id, class name)` assignments from `class A,B name` and `A:::name`.
+    class_assignments: Vec<(String, String)>,
+    /// Inline `style <id> ...` overrides applied directly to a node.
+    node_inline: Vec<(String, ElemStyle)>,
+    /// `linkStyle <n> ...` overrides, keyed by 0-based edge index.
+    edge_inline: Vec<(usize, ElemStyle)>,
+    /// `linkStyle default ...` overrides applied to every edge.
+    edge_default: Vec<ElemStyle>,
+}
 
 /// Parse mermaid flowchart source (e.g. `graph TD; A[Start] --> B{Decision}`)
 /// into a [`FlowChart`]. Returns `Err(message)` on a syntax error.
@@ -39,6 +57,7 @@ pub fn parse_flowchart(src: &str) -> Result<FlowChart, String> {
     // Tracks insertion index of each node id so we can update (last-wins) the
     // existing entry rather than appending a duplicate.
     let mut node_index: Vec<(String, usize)> = Vec::new();
+    let mut directives = Directives::default();
 
     let mut header_seen = false;
 
@@ -146,7 +165,7 @@ fn parse_statement(stmt: &str, chart: &mut FlowChart, node_index: &mut Vec<(Stri
             label: edge.label,
             kind: edge.kind,
             arrow_start: edge.arrow_start,
-            arrow_end: edge.arrow_end,
+            arrow_end: edge.arrow_end, style: crate::model::ElemStyle::default(),
         });
         prev_id = target_id;
     }
@@ -188,7 +207,7 @@ fn upsert_node(chart: &mut FlowChart, node_index: &mut Vec<(String, usize)>, par
             chart.nodes.push(FlowNode {
                 id: parsed.id.clone(),
                 label,
-                shape: parsed.shape,
+                shape: parsed.shape, style: crate::model::ElemStyle::default(),
             });
             node_index.push((parsed.id, idx));
         }
