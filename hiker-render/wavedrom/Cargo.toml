@@ -1,0 +1,21 @@
+[package]
+name = "hiker-wavedrom"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust WaveDrom renderer (digital timing waveforms + bitfield/register diagrams) from WaveJSON → SVG. Egui-agnostic, SVG-string out."
+
+[dependencies]
+# WaveJSON is JSON5 (unquoted keys, single quotes, comments, trailing commas);
+# parse it into a generic `serde_json::Value` the renderers walk.
+json5 = "0.4"
+serde_json = "1"
+# Real text measurement: glyph advances from the bundled Liberation Sans (SIL
+# OFL — see fonts/LICENSE), so measured widths match what the SVG `<text>` draws.
+ttf-parser = "0.25"
+
+[dev-dependencies]
+# Eyeball-only: rasterize the SVG output to PNG in the example via resvg.
+resvg = "0.47.0"
+# The `gallery` example opens an egui window showing the SVGs as textures.
+eframe = "0.32"
+egui = "0.32"

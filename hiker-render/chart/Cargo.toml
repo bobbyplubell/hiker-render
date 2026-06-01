@@ -1,0 +1,41 @@
+[package]
+name = "hiker-chart"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust CSV charting widget: YAML config + CSV data → SVG, via plotters. Egui-agnostic, SVG-string out (same contract as the math/mermaid/wavedrom render crates)."
+
+[dependencies]
+# Charting backend. SVG-only: NO `ttf`/`font-kit` (that pulls system fonts +
+# native freetype/fontconfig and breaks wasm). The SVG backend emits `<text>`;
+# the host's resvg→texture pipeline does the real glyph drawing with our bundled
+# font. Enable `ttf` via this crate's `bitmap-fonts` feature only for a future
+# in-app bitmap/egui path where plotters draws glyphs itself.
+plotters = { version = "0.3.7", default-features = false, features = [
+    "svg_backend",
+    "line_series",
+    "point_series",
+    "area_series",
+    "histogram",
+    "chrono",
+] }
+# Config is real YAML, not a hand-rolled DSL — deserialized straight into
+# `ChartConfig`. `serde_yml` is the maintained serde_yaml fork hiker-core already
+# uses (../notes), so the config stack matches across both repos.
+serde = { version = "1", features = ["derive"] }
+serde_yml = "0.0.12"
+# Data is plain CSV (BurntSushi's well-maintained parser).
+csv = "1"
+# Real text metrics from the bundled Liberation Sans, for our own measurement
+# (and so a rasterizer can load the exact font we measured with).
+ttf-parser = "0.25"
+
+[features]
+default = []
+# Pull plotters' real font backend (font-kit) for a bitmap/egui drawing path
+# where plotters renders glyphs itself. Off by default: the SVG widget path
+# lets resvg draw, so font-kit/system fonts are unnecessary there.
+bitmap-fonts = ["plotters/ttf", "plotters/bitmap_backend"]
+
+[dev-dependencies]
+# Eyeball-only: rasterize the SVG output to PNG in the example via resvg.
+resvg = "0.47.0"

@@ -6,5 +6,5 @@
 # The `hiker-render` root package is a legacy LaTeX-math copy being consolidated
 # into `hiker-render/math` (hiker-math); nothing depends on it.
 [workspace]
-members = ["hiker-render", "hiker-render/htmlview", "hiker-render/graph", "hiker-render/math", "hiker-render/mermaid"]
+members = ["hiker-render", "hiker-render/htmlview", "hiker-render/graph", "hiker-render/math", "hiker-render/mermaid", "hiker-render/wavedrom", "hiker-render/chart"]
 resolver = "2"
