@@ -124,6 +124,9 @@ pub fn layout_flowchart(
                 w,
                 h,
                 style: chart.nodes[i].style.clone(),
+                link: chart.nodes[i].link.clone(),
+                callback: chart.nodes[i].callback.clone(),
+                tooltip: chart.nodes[i].tooltip.clone(),
             }
         })
         .collect();
@@ -223,6 +226,9 @@ mod tests {
             label: id.to_string(),
             shape: NodeShape::Rect,
             style: Default::default(),
+            link: None,
+            callback: None,
+            tooltip: None,
         }
     }
 

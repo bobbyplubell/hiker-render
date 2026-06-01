@@ -13,7 +13,9 @@
 //!   cargo build -p hiker-mermaid --example gallery
 
 use eframe::egui;
-use hiker_mermaid::{Look, MermaidError, MermaidOptions, MermaidRender, MermaidTheme, render};
+use hiker_mermaid::{
+    HitRegion, Look, MermaidError, MermaidOptions, MermaidRender, MermaidTheme, render_with_regions,
+};
 
 /// Display name for a theme.
 fn theme_name(t: MermaidTheme) -> &'static str {
@@ -115,6 +117,11 @@ fn examples() -> Vec<Example> {
             name: "Styled (classDef)",
             group: Group::Flowchart,
             src: "graph TD\n    A[Start]:::hot --> B{Check}\n    B -->|ok| C[Process]:::cool\n    B -->|fail| D[Reject]\n    style D fill:#fdd,stroke:#c00,stroke-width:3px\n    classDef hot fill:#ffb3b3,stroke:#c00,stroke-width:3px\n    classDef cool fill:#b3d9ff,stroke:#06c,stroke-width:2px",
+        },
+        Example {
+            name: "Interactive (click)",
+            group: Group::Flowchart,
+            src: "graph TD\n    A[Homepage] --> B[Docs]\n    A --> C[Login]\n    C --> D[Dashboard]\n    click A \"https://example.com\" \"Open the homepage\"\n    click B \"https://example.com/docs\" \"Read the docs\"\n    click D call openDashboard() \"Run a callback\"",
         },
         Example {
             name: "Subgraphs",
@@ -290,6 +297,8 @@ struct Rendered {
     texture: egui::TextureHandle,
     diagram_w: f32,
     diagram_h: f32,
+    /// Interactive hit regions (flowchart node `click`/tooltip data), in diagram px.
+    regions: Vec<HitRegion>,
 }
 
 struct GalleryApp {
@@ -314,6 +323,8 @@ struct GalleryApp {
     raster_scale: f32,
     /// Show a checkered background behind the (possibly transparent) diagram.
     checkered: bool,
+    /// Last interaction (a node was clicked) — shown in a status line.
+    last_click: Option<String>,
 }
 
 impl Default for GalleryApp {
@@ -332,6 +343,7 @@ impl Default for GalleryApp {
             zoom: 1.0,
             raster_scale: 2.0,
             checkered: false,
+            last_click: None,
         }
     }
 }
@@ -458,28 +470,70 @@ impl eframe::App for GalleryApp {
                         ));
                         ui.separator();
                         ui.label(format!("(shown at {:.0}%)", self.zoom * 100.0));
+                        if !r.regions.is_empty() {
+                            ui.separator();
+                            ui.label(format!("{} interactive region(s)", r.regions.len()));
+                        }
+                        if let Some(c) = &self.last_click {
+                            ui.separator();
+                            ui.colored_label(egui::Color32::from_rgb(0, 110, 200), c);
+                        }
                     });
                     ui.separator();
 
-                    let display = egui::vec2(r.diagram_w * self.zoom, r.diagram_h * self.zoom);
+                    let zoom = self.zoom;
+                    let display = egui::vec2(r.diagram_w * zoom, r.diagram_h * zoom);
+                    let mut click_msg = None;
                     egui::ScrollArea::both().show(ui, |ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(display, egui::Sense::hover());
+                        // Sense clicks so node `click` regions are interactive.
+                        let (rect, response) =
+                            ui.allocate_exact_size(display, egui::Sense::click());
                         if self.checkered {
                             paint_checkered(ui, rect);
                         } else {
-                            ui.painter().rect_filled(
-                                rect,
-                                0.0,
-                                egui::Color32::WHITE,
-                            );
+                            ui.painter().rect_filled(rect, 0.0, egui::Color32::WHITE);
                         }
                         let img = egui::Image::new(egui::load::SizedTexture::new(
                             r.texture.id(),
                             display,
                         ));
                         img.paint_at(ui, rect);
+
+                        // Hit-test the pointer (mapped into diagram px) against the
+                        // regions — this is how an egui host makes a static SVG
+                        // diagram interactive (hover highlight/tooltip + click).
+                        if let Some(p) = response.hover_pos() {
+                            let d = (p - rect.min) / zoom; // screen → diagram coords
+                            if let Some(reg) = r.regions.iter().find(|reg| {
+                                d.x >= reg.x
+                                    && d.x <= reg.x + reg.w
+                                    && d.y >= reg.y
+                                    && d.y <= reg.y + reg.h
+                            }) {
+                                // Highlight the region.
+                                let hr = egui::Rect::from_min_size(
+                                    rect.min + egui::vec2(reg.x, reg.y) * zoom,
+                                    egui::vec2(reg.w, reg.h) * zoom,
+                                );
+                                ui.painter().rect_filled(
+                                    hr,
+                                    3.0,
+                                    egui::Color32::from_rgba_unmultiplied(0, 120, 215, 38),
+                                );
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                paint_tooltip(ui, p, &region_label(reg));
+                                if response.clicked() {
+                                    if let Some(url) = &reg.link {
+                                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                    }
+                                    click_msg = Some(format!("clicked: {}", region_label(reg)));
+                                }
+                            }
+                        }
                     });
+                    if click_msg.is_some() {
+                        self.last_click = click_msg;
+                    }
                 }
                 Err(msg) => {
                     ui.colored_label(egui::Color32::RED, format!("Render error: {msg}"));
@@ -487,6 +541,32 @@ impl eframe::App for GalleryApp {
             }
         });
     }
+}
+
+/// A one-line description of a hit region for the hover tooltip / status line.
+fn region_label(reg: &HitRegion) -> String {
+    let mut s = reg.id.clone();
+    if let Some(t) = &reg.tooltip {
+        s = format!("{s} — {t}");
+    }
+    if let Some(url) = &reg.link {
+        s = format!("{s}  →  {url}");
+    } else if let Some(cb) = &reg.callback {
+        s = format!("{s}  ⇒  {cb}()");
+    }
+    s
+}
+
+/// Paint a small dark tooltip box with `text` just past the pointer `p`.
+fn paint_tooltip(ui: &egui::Ui, p: egui::Pos2, text: &str) {
+    let painter = ui.painter();
+    let galley =
+        painter.layout_no_wrap(text.to_owned(), egui::FontId::proportional(13.0), egui::Color32::WHITE);
+    let pad = egui::vec2(6.0, 4.0);
+    let origin = p + egui::vec2(14.0, 14.0);
+    let box_rect = egui::Rect::from_min_size(origin, galley.size() + pad * 2.0);
+    painter.rect_filled(box_rect, 4.0, egui::Color32::from_black_alpha(225));
+    painter.galley(origin + pad, galley, egui::Color32::WHITE);
 }
 
 /// Paint a light checkerboard over `rect` (so a transparent diagram reads).
@@ -525,11 +605,14 @@ fn render_to_texture(
     opts: &MermaidOptions,
     scale: f32,
 ) -> Result<Rendered, String> {
-    let MermaidRender {
-        svg,
-        width_px,
-        height_px,
-    } = render(src, opts).map_err(fmt_err)?;
+    let (
+        MermaidRender {
+            svg,
+            width_px,
+            height_px,
+        },
+        regions,
+    ) = render_with_regions(src, opts).map_err(fmt_err)?;
 
     let color_image = rasterize(&svg, width_px, height_px, scale)?;
     let texture = ctx.load_texture("diagram", color_image, egui::TextureOptions::LINEAR);
@@ -537,6 +620,7 @@ fn render_to_texture(
         texture,
         diagram_w: width_px,
         diagram_h: height_px,
+        regions,
     })
 }
 

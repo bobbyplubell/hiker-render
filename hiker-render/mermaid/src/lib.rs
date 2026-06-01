@@ -214,9 +214,20 @@ pub fn render_flowchart(src: &str, opts: &MermaidOptions) -> Result<MermaidRende
 pub fn render(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, MermaidError> {
     // Honor `---` frontmatter and `%%{init}%%` config (theme / look / fontFamily
     // / fontSize), and strip them so the diagram parsers see a clean source.
+    let (clean, owned) = preprocess_opts(src, opts);
+    let opts: &MermaidOptions = owned.as_ref().unwrap_or(opts);
+    let mut rendered = dispatch(&clean, opts)?;
+    finish_svg(&mut rendered, opts);
+    Ok(rendered)
+}
+
+/// Apply `---` frontmatter / `%%{init}%%` config (theme / look / fontFamily /
+/// fontSize) to `opts`, returning the cleaned source plus an owned options clone
+/// when any config was present (else `None`, so the caller reuses the borrow).
+/// Shared by [`render`] and [`render_with_regions`].
+fn preprocess_opts(src: &str, opts: &MermaidOptions) -> (String, Option<MermaidOptions>) {
     let (clean, cfg) = theme::preprocess(src);
-    let owned;
-    let opts: &MermaidOptions = if cfg.theme.is_some()
+    if cfg.theme.is_some()
         || cfg.look.is_some()
         || cfg.font_family.is_some()
         || cfg.font_size.is_some()
@@ -234,18 +245,91 @@ pub fn render(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Mermaid
         if let Some(s) = cfg.font_size {
             o.font_size_px = s;
         }
-        owned = o;
-        &owned
+        (clean, Some(o))
     } else {
-        opts
-    };
-    let mut rendered = dispatch(&clean, opts)?;
-    inject_background(&mut rendered, opts.background);
-    // Hand-drawn look: rewrite the SVG's shapes into sketchy paths.
+        (clean, None)
+    }
+}
+
+/// Common SVG post-processing: inject the background rect and, for the
+/// hand-drawn look, roughen shapes into sketchy paths. Shared by [`render`] and
+/// [`render_with_regions`].
+fn finish_svg(rendered: &mut MermaidRender, opts: &MermaidOptions) {
+    inject_background(rendered, opts.background);
     if opts.look == Look::HandDrawn {
         rough::roughen(&mut rendered.svg);
     }
-    Ok(rendered)
+}
+
+/// A clickable/hoverable region of a rendered diagram, in diagram-px coords
+/// (the same space as the SVG `viewBox`). An interactive host hit-tests the
+/// pointer against these and responds — open `link`, invoke `callback`, or show
+/// `tooltip` — the static-SVG-friendly way to do mermaid's `click` directive.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HitRegion {
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub link: Option<String>,
+    pub callback: Option<String>,
+    pub tooltip: Option<String>,
+}
+
+/// Like [`render`], but also returns per-element hit regions for interaction.
+/// Currently flowchart node regions (with their `click`/tooltip data); other
+/// diagram types return an empty region list (the SVG still renders).
+pub fn render_with_regions(
+    src: &str,
+    opts: &MermaidOptions,
+) -> Result<(MermaidRender, Vec<HitRegion>), MermaidError> {
+    let (clean, owned) = preprocess_opts(src, opts);
+    let opts: &MermaidOptions = owned.as_ref().unwrap_or(opts);
+
+    // Flowcharts: build the positioned diagram once so we can both draw the SVG
+    // and derive hit regions from the very same node boxes.
+    match diagram_keyword(&clean).as_deref() {
+        Some("graph") | Some("flowchart") => {
+            let chart = parse::parse_flowchart(&clean).map_err(MermaidError::Parse)?;
+            if chart.nodes.is_empty() {
+                return Err(MermaidError::Empty);
+            }
+            let sizes: Vec<(f32, f32)> = chart
+                .nodes
+                .iter()
+                .map(|n| measure::measure_node(&n.label, n.shape, opts))
+                .collect();
+            let diagram = layout::layout_flowchart(&chart, &sizes, opts);
+            let regions: Vec<HitRegion> = diagram
+                .nodes
+                .iter()
+                .map(|n| HitRegion {
+                    id: n.id.clone(),
+                    x: n.cx - n.w / 2.0,
+                    y: n.cy - n.h / 2.0,
+                    w: n.w,
+                    h: n.h,
+                    link: n.link.clone(),
+                    callback: n.callback.clone(),
+                    tooltip: n.tooltip.clone(),
+                })
+                .collect();
+            let mut rendered = MermaidRender {
+                svg: draw::draw_svg(&diagram, opts),
+                width_px: diagram.width,
+                height_px: diagram.height,
+            };
+            finish_svg(&mut rendered, opts);
+            Ok((rendered, regions))
+        }
+        // Non-flowchart: render normally, no regions.
+        _ => {
+            let mut rendered = dispatch(&clean, opts)?;
+            finish_svg(&mut rendered, opts);
+            Ok((rendered, Vec::new()))
+        }
+    }
 }
 
 /// Insert a full-bleed background `<rect>` just after the opening `<svg …>` tag
@@ -327,4 +411,66 @@ fn diagram_keyword(src: &str) -> Option<String> {
             .map(|t| t.trim_end_matches(':').to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+
+    #[test]
+    fn flowchart_regions_carry_click_data() {
+        let opts = MermaidOptions::default();
+        let (render, regions) = render_with_regions(
+            "graph TD\n A[Start]\n click A \"https://x\" \"go\"",
+            &opts,
+        )
+        .expect("render ok");
+
+        // Valid render produced.
+        assert!(render.svg.starts_with("<svg"));
+        assert!(render.width_px > 0.0 && render.height_px > 0.0);
+
+        // One region per node; A carries link + tooltip.
+        let a = regions.iter().find(|r| r.id == "A").expect("region for A");
+        assert_eq!(a.link.as_deref(), Some("https://x"));
+        assert_eq!(a.tooltip.as_deref(), Some("go"));
+        assert!(a.callback.is_none());
+
+        // Rect roughly matches a node box: positive size, within the diagram.
+        assert!(a.w > 0.0 && a.h > 0.0);
+        assert!(a.x >= 0.0 && a.y >= 0.0);
+        assert!(a.x + a.w <= render.width_px + 1.0);
+        assert!(a.y + a.h <= render.height_px + 1.0);
+    }
+
+    #[test]
+    fn region_count_matches_node_count() {
+        let opts = MermaidOptions::default();
+        let (_render, regions) =
+            render_with_regions("graph TD\n A --> B --> C", &opts).expect("render ok");
+        let ids: std::collections::HashSet<&str> =
+            regions.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["A", "B", "C"].into_iter().collect());
+    }
+
+    #[test]
+    fn non_flowchart_returns_empty_regions() {
+        let opts = MermaidOptions::default();
+        let (render, regions) =
+            render_with_regions("pie\n \"A\" : 10\n \"B\" : 20", &opts).expect("render ok");
+        assert!(regions.is_empty());
+        assert!(render.svg.starts_with("<svg"));
+        assert!(render.width_px > 0.0);
+    }
+
+    #[test]
+    fn render_with_regions_svg_matches_render_for_click_free() {
+        let opts = MermaidOptions::default();
+        let src = "graph TD\n A[Start] --> B{OK?}";
+        let plain = render(src, &opts).expect("render ok");
+        let (with_regions, _) = render_with_regions(src, &opts).expect("render ok");
+        assert_eq!(plain.svg, with_regions.svg);
+        assert_eq!(plain.width_px, with_regions.width_px);
+        assert_eq!(plain.height_px, with_regions.height_px);
+    }
 }

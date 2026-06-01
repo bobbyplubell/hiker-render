@@ -46,6 +46,17 @@ struct Directives {
     edge_inline: Vec<(usize, ElemStyle)>,
     /// `linkStyle default ...` overrides applied to every edge.
     edge_default: Vec<ElemStyle>,
+    /// `click <id> ...` interaction directives, resolved onto nodes at the end.
+    /// `(node id, link, callback, tooltip)`; the node is auto-created if absent.
+    clicks: Vec<ClickDirective>,
+}
+
+/// One parsed `click` directive (interaction data for a node).
+struct ClickDirective {
+    id: String,
+    link: Option<String>,
+    callback: Option<String>,
+    tooltip: Option<String>,
 }
 
 /// Parse mermaid flowchart source (e.g. `graph TD; A[Start] --> B{Decision}`)
@@ -206,8 +217,142 @@ fn parse_directive(stmt: &str, dir: &mut Directives) -> bool {
             }
             true
         }
+        "click" => {
+            // click <id> ... — interaction directive. Always consumed (true) so
+            // it isn't parsed as a node/edge statement; a malformed one is a no-op.
+            let rest = stmt[kw.len()..].trim_start();
+            if let Some(c) = parse_click(rest) {
+                dir.clicks.push(c);
+            }
+            true
+        }
         _ => false,
     }
+}
+
+/// Parse the body of a `click <id> ...` directive (everything after `click`).
+/// Supported forms (quote-aware):
+/// - `<id> "<url>" ["<tooltip>"]`            → link (+ tooltip)
+/// - `<id> href "<url>" ["<tooltip>"]`       → link (+ tooltip)
+/// - `<id> call <name>(<args>) ["<tooltip>"]` → callback = name (args dropped)
+/// - `<id> callback` / `<id> <name>` (bareword) → callback = the word
+///
+/// A trailing `_blank`/`_self` target token after a url is tolerated and ignored.
+/// Returns `None` if no id is present.
+fn parse_click(rest: &str) -> Option<ClickDirective> {
+    let toks = tokenize_click(rest);
+    let mut it = toks.into_iter();
+    // The id is the first token (a word; a quoted first token is malformed).
+    let id = match it.next()? {
+        ClickTok::Word(w) => w,
+        ClickTok::Quoted(_) => return None,
+    };
+    let mut link = None;
+    let mut callback = None;
+    let mut tooltip = None;
+
+    let rest_toks: Vec<ClickTok> = it.collect();
+    let mut i = 0;
+    while i < rest_toks.len() {
+        match &rest_toks[i] {
+            ClickTok::Word(w) if w == "href" => {
+                // Next quoted token is the url.
+                if let Some(ClickTok::Quoted(u)) = rest_toks.get(i + 1) {
+                    link = Some(u.clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ClickTok::Word(w) if w == "call" => {
+                // Next token is `name(args)` (a bare word possibly with parens).
+                if let Some(ClickTok::Word(callee)) = rest_toks.get(i + 1) {
+                    let name = callee.split('(').next().unwrap_or(callee).trim();
+                    if !name.is_empty() {
+                        callback = Some(name.to_string());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ClickTok::Word(w) if w == "_blank" || w == "_self" => {
+                // Link target — tolerated and ignored.
+                i += 1;
+            }
+            ClickTok::Word(w) => {
+                // Bareword callback (`click A callback` / `click A doThing`),
+                // only when we haven't already found a link/callback.
+                if link.is_none() && callback.is_none() {
+                    let name = w.split('(').next().unwrap_or(w).trim();
+                    if !name.is_empty() {
+                        callback = Some(name.to_string());
+                    }
+                }
+                i += 1;
+            }
+            ClickTok::Quoted(s) => {
+                // First quoted string is the url (if no link yet), else tooltip.
+                if link.is_none() && callback.is_none() {
+                    link = Some(s.clone());
+                } else if tooltip.is_none() {
+                    tooltip = Some(s.clone());
+                }
+                i += 1;
+            }
+        }
+    }
+
+    Some(ClickDirective {
+        id,
+        link,
+        callback,
+        tooltip,
+    })
+}
+
+/// A token from a `click` directive body: a bare word or a double-quoted string.
+enum ClickTok {
+    Word(String),
+    Quoted(String),
+}
+
+/// Split a `click` directive body into quote-aware tokens. Double-quoted spans
+/// become a single [`ClickTok::Quoted`] (quotes stripped); other whitespace-
+/// delimited runs become [`ClickTok::Word`].
+fn tokenize_click(s: &str) -> Vec<ClickTok> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace.
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += 1;
+            }
+            let inner = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            out.push(ClickTok::Quoted(inner.to_string()));
+            if i < bytes.len() {
+                i += 1; // consume closing quote
+            }
+        } else {
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'"' {
+                i += 1;
+            }
+            let word = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+            if !word.is_empty() {
+                out.push(ClickTok::Word(word.to_string()));
+            }
+        }
+    }
+    out
 }
 
 /// Resolve collected directives onto the chart's nodes and edges. Apply order
@@ -237,6 +382,35 @@ fn resolve_styles(chart: &mut FlowChart, dir: &Directives) {
     for (n, style) in &dir.edge_inline {
         if let Some(e) = chart.edges.get_mut(*n) {
             merge_style(&mut e.style, style);
+        }
+    }
+
+    // Interaction: apply `click` directives. An unknown id is auto-created as a
+    // Rect node with `label == id` so the region still hit-tests.
+    for c in &dir.clicks {
+        let node = match chart.nodes.iter_mut().find(|n| n.id == c.id) {
+            Some(n) => n,
+            None => {
+                chart.nodes.push(FlowNode {
+                    id: c.id.clone(),
+                    label: c.id.clone(),
+                    shape: NodeShape::Rect,
+                    style: ElemStyle::default(),
+                    link: None,
+                    callback: None,
+                    tooltip: None,
+                });
+                chart.nodes.last_mut().unwrap()
+            }
+        };
+        if c.link.is_some() {
+            node.link = c.link.clone();
+        }
+        if c.callback.is_some() {
+            node.callback = c.callback.clone();
+        }
+        if c.tooltip.is_some() {
+            node.tooltip = c.tooltip.clone();
         }
     }
 }
@@ -568,7 +742,11 @@ fn upsert_node(
             chart.nodes.push(FlowNode {
                 id: parsed.id.clone(),
                 label,
-                shape: parsed.shape, style: crate::model::ElemStyle::default(),
+                shape: parsed.shape,
+                style: crate::model::ElemStyle::default(),
+                link: None,
+                callback: None,
+                tooltip: None,
             });
             node_index.push((parsed.id.clone(), idx));
         }
@@ -686,8 +864,16 @@ fn extract_group(bytes: &[u8], pos: &mut usize, open: &[u8], close: &[u8]) -> Op
     }
     let inner_start = *pos + open.len();
     let mut i = inner_start;
+    // Quote-aware: a `"…"` span suppresses close-delimiter matching, so a quoted
+    // label may itself contain the close bracket — e.g. `["a [link](u)"]`.
+    let mut in_quotes = false;
     while i < bytes.len() {
-        if starts_with(bytes, i, close) {
+        if bytes[i] == b'"' {
+            in_quotes = !in_quotes;
+            i += 1;
+            continue;
+        }
+        if !in_quotes && starts_with(bytes, i, close) {
             let inner = std::str::from_utf8(&bytes[inner_start..i]).ok()?;
             *pos = i + close.len();
             return Some(clean_label(inner));
@@ -1406,6 +1592,82 @@ mod tests {
     fn no_subgraph_chart_has_no_subgraphs() {
         let c = parse("flowchart TD\nA --> B --> C");
         assert!(c.subgraphs.is_empty());
+    }
+
+    // ── Click / interaction directives ─────────────────────────────────────
+
+    #[test]
+    fn click_url_sets_link() {
+        let c = parse("graph TD\nA[Start]\nclick A \"https://x\"");
+        assert_eq!(node(&c, "A").link.as_deref(), Some("https://x"));
+        assert!(node(&c, "A").tooltip.is_none());
+        assert!(node(&c, "A").callback.is_none());
+    }
+
+    #[test]
+    fn click_href_url_sets_link() {
+        let c = parse("graph TD\nA[Start]\nclick A href \"https://x\"");
+        assert_eq!(node(&c, "A").link.as_deref(), Some("https://x"));
+    }
+
+    #[test]
+    fn click_url_and_tooltip() {
+        let c = parse("graph TD\nA[Start]\nclick A \"https://x\" \"go there\"");
+        assert_eq!(node(&c, "A").link.as_deref(), Some("https://x"));
+        assert_eq!(node(&c, "A").tooltip.as_deref(), Some("go there"));
+    }
+
+    #[test]
+    fn click_href_url_and_tooltip() {
+        let c = parse("graph TD\nA[Start]\nclick A href \"u\" \"tip\"");
+        assert_eq!(node(&c, "A").link.as_deref(), Some("u"));
+        assert_eq!(node(&c, "A").tooltip.as_deref(), Some("tip"));
+    }
+
+    #[test]
+    fn click_call_sets_callback_dropping_args() {
+        let c = parse("graph TD\nA\nclick A call doThing()");
+        assert_eq!(node(&c, "A").callback.as_deref(), Some("doThing"));
+        assert!(node(&c, "A").link.is_none());
+    }
+
+    #[test]
+    fn click_call_with_args_and_tooltip() {
+        let c = parse("graph TD\nA\nclick A call doThing(1, 2) \"tip\"");
+        assert_eq!(node(&c, "A").callback.as_deref(), Some("doThing"));
+        assert_eq!(node(&c, "A").tooltip.as_deref(), Some("tip"));
+    }
+
+    #[test]
+    fn click_bareword_callback() {
+        let c = parse("graph TD\nA\nclick A myCallback");
+        assert_eq!(node(&c, "A").callback.as_deref(), Some("myCallback"));
+    }
+
+    #[test]
+    fn click_url_with_target_ignored() {
+        let c = parse("graph TD\nA\nclick A \"https://x\" _blank");
+        assert_eq!(node(&c, "A").link.as_deref(), Some("https://x"));
+        // _blank is tolerated and not recorded as a callback.
+        assert!(node(&c, "A").callback.is_none());
+    }
+
+    #[test]
+    fn click_unknown_id_autocreates_node() {
+        let c = parse("graph TD\nA --> B\nclick Z \"https://z\"");
+        let z = node(&c, "Z");
+        assert_eq!(z.shape, NodeShape::Rect);
+        assert_eq!(z.label, "Z");
+        assert_eq!(z.link.as_deref(), Some("https://z"));
+    }
+
+    #[test]
+    fn click_is_not_an_edge_or_node_statement() {
+        // A click line must not create phantom nodes beyond its target, nor edges.
+        let c = parse("graph TD\nA --> B\nclick A \"u\"");
+        let ids: Vec<&str> = c.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B"]);
+        assert_eq!(c.edges.len(), 1);
     }
 
     #[test]

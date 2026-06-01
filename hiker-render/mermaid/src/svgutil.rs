@@ -50,6 +50,50 @@ pub fn opacity_attr(name: &str, c: [u8; 4]) -> String {
     }
 }
 
+/// Build an SVG path `d` that draws a SMOOTH curve through `points` (a
+/// Catmull-Rom spline converted to cubic Béziers — it passes through every
+/// point, so clipped endpoints and arrowheads stay aligned). Falls back to a
+/// straight polyline for fewer than 3 points. Returns just the `d` value
+/// (e.g. `"M0,0 C..."`).
+///
+/// Deterministic. Uses the same `{:.2}` number formatting as the rest of this
+/// module.
+pub fn smooth_path_d(points: &[(f32, f32)]) -> String {
+    use std::fmt::Write as _;
+    match points.len() {
+        0 => return String::new(),
+        1 => return format!("M{:.2},{:.2}", points[0].0, points[0].1),
+        2 => {
+            return format!(
+                "M{:.2},{:.2} L{:.2},{:.2}",
+                points[0].0, points[0].1, points[1].0, points[1].1
+            )
+        }
+        _ => {}
+    }
+    let n = points.len();
+    let p = |i: isize| -> (f32, f32) {
+        let i = i.clamp(0, (n - 1) as isize) as usize;
+        points[i]
+    };
+    let mut d = format!("M{:.2},{:.2}", points[0].0, points[0].1);
+    for i in 0..n - 1 {
+        let p0 = p(i as isize - 1);
+        let p1 = p(i as isize);
+        let p2 = p(i as isize + 1);
+        let p3 = p(i as isize + 2);
+        // Catmull-Rom → cubic Bézier control points.
+        let c1 = (p1.0 + (p2.0 - p0.0) / 6.0, p1.1 + (p2.1 - p0.1) / 6.0);
+        let c2 = (p2.0 - (p3.0 - p1.0) / 6.0, p2.1 - (p3.1 - p1.1) / 6.0);
+        let _ = write!(
+            d,
+            " C{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}",
+            c1.0, c1.1, c2.0, c2.1, p2.0, p2.1
+        );
+    }
+    d
+}
+
 fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
@@ -131,6 +175,30 @@ mod tests {
         // A lone edge sits on the midpoint.
         let lone = edge_label_anchor(&route, 0, 1, 16.0).unwrap();
         assert!((lone.0 - 50.0).abs() < 0.001 && lone.1.abs() < 0.001, "lone label at midpoint");
+    }
+
+    #[test]
+    fn smooth_path_curves_and_passes_through_endpoints() {
+        // >= 3 points → a smooth cubic-Bézier path through every point.
+        let pts = [(0.0, 0.0), (10.0, 20.0), (30.0, 10.0), (50.0, 40.0)];
+        let d = smooth_path_d(&pts);
+        assert!(d.starts_with('M'), "starts with M: {d}");
+        assert!(d.contains('C'), "uses cubic Béziers: {d}");
+        // Deterministic.
+        assert_eq!(d, smooth_path_d(&pts));
+        // The path's first command targets the first point and its last anchor is
+        // the last point (the curve passes through both endpoints exactly).
+        assert!(d.starts_with("M0.00,0.00"), "starts at first point: {d}");
+        assert!(d.ends_with("50.00,40.00"), "ends at last point: {d}");
+
+        // 2 points → a straight line.
+        let two = smooth_path_d(&[(1.0, 2.0), (3.0, 4.0)]);
+        assert!(two.contains('L'), "two points → polyline: {two}");
+        assert_eq!(two, "M1.00,2.00 L3.00,4.00");
+
+        // Degenerate inputs.
+        assert_eq!(smooth_path_d(&[(5.0, 6.0)]), "M5.00,6.00");
+        assert_eq!(smooth_path_d(&[]), "");
     }
 
     #[test]

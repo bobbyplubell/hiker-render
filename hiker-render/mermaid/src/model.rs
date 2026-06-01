@@ -63,6 +63,13 @@ pub struct FlowNode {
     pub shape: NodeShape,
     /// Per-node style overrides (from `classDef`/`class`/`style`).
     pub style: ElemStyle,
+    /// Interaction: navigation URL from a `click <id> "url"` / `href` directive.
+    pub link: Option<String>,
+    /// Interaction: callback name from a `click <id> call name(args)` directive
+    /// (args are dropped; the host decides what to invoke).
+    pub callback: Option<String>,
+    /// Interaction: hover tooltip text from a `click` directive's trailing string.
+    pub tooltip: Option<String>,
 }
 
 /// Edge line style.
@@ -132,6 +139,12 @@ pub struct PositionedNode {
     pub h: f32,
     /// Per-node style overrides (resolved from the FlowNode).
     pub style: ElemStyle,
+    /// Interaction: navigation URL (copied from the source [`FlowNode`]).
+    pub link: Option<String>,
+    /// Interaction: callback name (copied from the source [`FlowNode`]).
+    pub callback: Option<String>,
+    /// Interaction: hover tooltip (copied from the source [`FlowNode`]).
+    pub tooltip: Option<String>,
 }
 
 /// A routed edge: a polyline through `points` (already clipped to node borders),

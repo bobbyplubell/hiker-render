@@ -611,8 +611,33 @@ pub fn render_c4(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
         directed: true,
     });
 
-    let width = (out.size.x.ceil() + 1.0).max(1.0);
-    let height = (out.size.y.ceil() + 1.0).max(1.0);
+    let base_width = (out.size.x.ceil() + 1.0).max(1.0);
+    let base_height = (out.size.y.ceil() + 1.0).max(1.0);
+
+    // Boundary labels are drawn ABOVE each box's top edge (using the gap that
+    // already exists above nested clusters), so children never paint over them.
+    // Reserve a top margin for the outermost boundary, and widen the canvas for
+    // any label that extends past the right edge.
+    let label_block_h = fs * LINE_H_EM + fs + 4.0;
+    let mut top_pad = 0.0f32;
+    let mut right_pad = 0.0f32;
+    for j in 0..diag.boundaries.len() {
+        let k = n + j;
+        match (out.positions.get(k), out.node_sizes.get(k)) {
+            (Some(c), Some(s)) if s.x > 0.0 && s.y > 0.0 => {
+                let left = c.x - s.x / 2.0;
+                let top = c.y - s.y / 2.0;
+                top_pad = top_pad.max(label_block_h - top);
+                let lw = boundary_label_width(&diag.boundaries[j], fs);
+                right_pad = right_pad.max(left + lw - base_width);
+            }
+            _ => {}
+        }
+    }
+    let top_pad = top_pad.max(0.0).ceil();
+    let right_pad = right_pad.max(0.0).ceil();
+    let width = base_width + right_pad;
+    let height = base_height + top_pad;
 
     let mut svg = String::new();
     let _ = write!(
@@ -620,6 +645,9 @@ pub fn render_c4(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
          viewBox=\"0 0 {width} {height}\">"
     );
+    // Shift all diagram content down by `top_pad` so above-box boundary labels
+    // (and anything at y≈0) stay on-canvas.
+    let _ = write!(svg, "<g transform=\"translate(0,{top_pad:.2})\">");
 
     // Boundary rectangles first — behind relationships and element boxes. Read
     // back each boundary's rect (center from `out.positions`, size from
@@ -677,7 +705,7 @@ pub fn render_c4(src: &str, opts: &MermaidOptions) -> Result<MermaidRender, Merm
         emit_element(&mut svg, e, pos.x, pos.y, w, h, line_h, opts);
     }
 
-    svg.push_str("</svg>");
+    svg.push_str("</g></svg>");
 
     Ok(MermaidRender {
         svg,
@@ -850,13 +878,22 @@ fn emit_boundary(
         so = opacity_attr("stroke-opacity", BOUNDARY_STROKE),
     );
 
-    // Type line then name, top-left, just inside the rect. Left-anchored.
-    let pad = 6.0_f32;
-    let tx = x + pad;
-    let mut ty = y + pad + fs * 0.5;
-    emit_boundary_text(svg, boundary.kind.type_label(), tx, ty, fs, opts, None);
-    ty += fs * LINE_H_EM;
-    emit_boundary_text(svg, &boundary.label, tx, ty, fs, opts, Some("bold"));
+    // `«Type»` then the bold name, stacked just ABOVE the top edge (left-anchored)
+    // so member boxes — which sit at the very top of the cluster — never cover
+    // them. The caller reserves the headroom (top margin / sibling gap).
+    let tx = x + 2.0;
+    let name_y = y - fs * 0.5 - 2.0;
+    let type_y = name_y - fs * LINE_H_EM;
+    emit_boundary_text(svg, boundary.kind.type_label(), tx, type_y, fs, opts, None);
+    emit_boundary_text(svg, &boundary.label, tx, name_y, fs, opts, Some("bold"));
+}
+
+/// Width needed for a boundary's two-line label (`«Type»` / bold name).
+fn boundary_label_width(boundary: &Boundary, fs: f32) -> f32 {
+    let type_w = crate::label::measure(boundary.kind.type_label(), fs).0;
+    // Name is bold (renders a touch wider than the measured regular weight).
+    let name_w = crate::label::measure(&boundary.label, fs).0 * 1.08;
+    type_w.max(name_w) + 4.0
 }
 
 /// A left-anchored single-line `<text>` for boundary labels.

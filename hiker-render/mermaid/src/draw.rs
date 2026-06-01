@@ -146,11 +146,9 @@ fn emit_edge(svg: &mut String, edge: &PositionedEdge, opts: &MermaidOptions) {
         pullback(&mut pts, false, ARROW_LEN);
     }
 
-    let mut d = String::new();
-    for (i, (x, y)) in pts.iter().enumerate() {
-        let cmd = if i == 0 { 'M' } else { 'L' };
-        let _ = write!(d, "{cmd}{x:.2},{y:.2} ");
-    }
+    // Smooth curve through the (already clipped + arrowhead-shortened) points,
+    // matching mermaid's d3 curveBasis look; <3 points fall back to a polyline.
+    let d = crate::svgutil::smooth_path_d(&pts);
 
     let (stroke, so) = stroke_attrs(edge.style.stroke.unwrap_or(opts.edge_stroke));
     let kind_width = match edge.kind {
@@ -394,6 +392,9 @@ mod tests {
             w: 60.0,
             h: 30.0,
                 style: Default::default(),
+                link: None,
+                callback: None,
+                tooltip: None,
             }
     }
 

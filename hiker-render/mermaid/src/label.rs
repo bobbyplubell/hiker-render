@@ -12,7 +12,7 @@
 //! - [`Run::Link`] — a markdown link `[text](url)`. The visible `text` is rendered
 //!   in the themed link color and underlined; the `url` is parsed but, since a
 //!   static SVG has no navigation, it is only used to wrap the text in an
-//!   `<a xlink:href>` (harmless, optionally honored by viewers). Width is measured
+//!   `<a href>` (harmless, optionally honored by viewers). Width is measured
 //!   from the visible `text` only.
 //! - [`Run::Code`] — inline code `` `code` `` rendered in a monospace family with a
 //!   faint rounded background box behind it.
@@ -63,6 +63,17 @@ const LINK_COLOR: [u8; 4] = [0, 90, 200, 255];
 
 /// Faint background fill behind inline code (a light grey).
 const CODE_BG: [u8; 4] = [235, 235, 235, 255];
+
+/// Bold renders slightly wider than the regular weight we measure with.
+const BOLD_WIDTH_FACTOR: f32 = 1.08;
+
+/// Monospace advance as a fraction of the font size (typical mono em-advance).
+const MONO_ADVANCE_EM: f32 = 0.6;
+
+/// Width of inline `code` rendered in a monospace family.
+fn code_width(s: &str, font_size: f32) -> f32 {
+    s.chars().count() as f32 * font_size * MONO_ADVANCE_EM
+}
 
 /// Whether `label` contains any rich markers (markdown emphasis, math, or an
 /// explicit `<br>`). A `\n` alone is already handled by the plain-text path
@@ -308,11 +319,17 @@ fn math_render(latex: &str, font_size: f32, color: [u8; 4]) -> Option<hiker_math
 /// `$latex$` text width when the engine can't render it.
 fn run_width(run: &Run, font_size: f32) -> f32 {
     match run {
-        Run::Text { s, .. } => font::line_width(s, font_size),
+        // Bold glyphs render a touch wider than the regular metric we measure
+        // with (we bundle only the regular weight); nudge so the next run clears.
+        Run::Text { s, bold, .. } => {
+            let w = font::line_width(s, font_size);
+            if *bold { w * BOLD_WIDTH_FACTOR } else { w }
+        }
         // Measure only the visible link text (real font metrics), not the url.
         Run::Link { text, .. } => font::line_width(text, font_size),
-        // Approximate code width with the existing sans metric.
-        Run::Code { s } => font::line_width(s, font_size),
+        // Code renders in a monospace family (fixed ~0.6em advance), wider than
+        // the sans metric — size it as monospace so neighbors don't overlap.
+        Run::Code { s } => code_width(s, font_size),
         Run::Math { latex } => match math_render(latex, font_size, [0, 0, 0, 255]) {
             Some(m) => m.width_px,
             None => font::line_width(&format!("${latex}$"), font_size),
@@ -391,24 +408,27 @@ pub fn emit(
                         let _ = write!(
                             svg,
                             "<text x=\"{x:.2}\" y=\"{baseline_y:.2}\" text-anchor=\"start\" \
+                             xml:space=\"preserve\" \
                              font-family=\"{family}\" font-size=\"{font_size}\" \
                              fill=\"{fill}\"{fo}{weight}{fstyle}>{}</text>",
                             escape(s),
                         );
                     }
-                    x += font::line_width(s, font_size);
+                    let w = font::line_width(s, font_size);
+                    x += if *bold { w * BOLD_WIDTH_FACTOR } else { w };
                 }
                 Run::Link { text, url } => {
                     let w = font::line_width(text, font_size);
                     if !text.is_empty() {
                         let link_fill = rgb(LINK_COLOR);
                         let link_fo = opacity(LINK_COLOR);
-                        // Wrap in <a xlink:href> (harmless; some viewers honor it),
+                        // Wrap in <a href> (SVG2, namespace-free; harmless; some viewers honor it),
                         // and underline the visible text.
-                        let _ = write!(svg, "<a xlink:href=\"{}\">", escape(url));
+                        let _ = write!(svg, "<a href=\"{}\">", escape(url));
                         let _ = write!(
                             svg,
                             "<text x=\"{x:.2}\" y=\"{baseline_y:.2}\" text-anchor=\"start\" \
+                             xml:space=\"preserve\" \
                              font-family=\"{family}\" font-size=\"{font_size}\" \
                              fill=\"{link_fill}\"{link_fo} \
                              text-decoration=\"underline\">{}</text>",
@@ -419,7 +439,7 @@ pub fn emit(
                     x += w;
                 }
                 Run::Code { s } => {
-                    let w = font::line_width(s, font_size);
+                    let w = code_width(s, font_size);
                     if !s.is_empty() {
                         // Faint rounded background box behind the code.
                         let pad = font_size * 0.15;
@@ -439,6 +459,7 @@ pub fn emit(
                         let _ = write!(
                             svg,
                             "<text x=\"{x:.2}\" y=\"{baseline_y:.2}\" text-anchor=\"start\" \
+                             xml:space=\"preserve\" \
                              font-family=\"monospace\" font-size=\"{font_size}\" \
                              fill=\"{fill}\"{fo}>{}</text>",
                             escape(s),
@@ -708,7 +729,7 @@ mod tests {
         // Themed link color (blue), regardless of BLACK base color.
         assert!(s.contains(&rgb(LINK_COLOR)), "link color missing: {s}");
         // url wrapped in <a> (not leaked as visible text).
-        assert!(s.contains("xlink:href=\"http://x\""), "got: {s}");
+        assert!(s.contains("href=\"http://x\""), "got: {s}");
     }
 
     #[test]
