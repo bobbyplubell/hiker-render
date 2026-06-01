@@ -1176,6 +1176,77 @@ mod tests {
     }
 
     #[test]
+    fn floated_auto_width_table_is_not_collapsed() {
+        // An infobox-style table floated right with width:auto must shrink-to-fit
+        // to its content's intrinsic width, not collapse to ~0px. When it
+        // collapsed, cell text wrapped one glyph per line (the "Arctic" infobox
+        // bug): the float asked `intrinsic_block` for the table's size, but the
+        // table's cell boxes are built lazily during table layout, so intrinsic
+        // measurement saw no children and returned 0.
+        let html = r#"<div style="width:800px">
+          <table style="float:right">
+            <tr><td>The Arctic is the northernmost polar region</td></tr>
+          </table>
+          <p>Body</p>
+        </div>"#;
+        let mut doc = parse_html(html);
+        let ctx = headless_ctx();
+        crate::css::stylo::style_document_stylo(&mut doc, &NullProvider, None, crate::Theme::Light, 1000.0, Some(&ctx));
+        let mut fonts = FontCtx::new(ctx, 1.0);
+        let (tree, _size) = layout_document(&doc, &mut fonts, 800.0, 1.0);
+
+        let root = tree.root.expect("root");
+        let mut tables = Vec::new();
+        collect(&tree, root, BoxKind::Table, &mut tables);
+        assert_eq!(tables.len(), 1, "exactly one table");
+        let tw = tree.boxes[tables[0]].content_rect.width();
+        // The phrase's min-content (widest word) is ~40px; a healthy
+        // shrink-to-fit is well over 100px. The bug produced ~0.
+        assert!(tw > 80.0, "floated table collapsed to {tw}px wide");
+    }
+
+    #[test]
+    fn float_with_fixed_width_inner_does_not_squeeze_siblings() {
+        // A right-floated thumbnail (`div.thumb.tright`) wraps an inner block with
+        // an explicit `width:312px;max-width:312px` and a long caption. The float's
+        // shrink-to-fit width must respect that inner width (~312px) so the caption
+        // wraps inside it — NOT grow to the caption's UNWRAPPED single-line width,
+        // which made the float fill the column and squeezed the lead paragraph to
+        // one glyph per line. Regression for the "Arctic" article. Mirrors the real
+        // structure (thumb > thumbinner[width] > trow > tsingle > caption); `float`
+        // and the widths are inline so the test needs no external stylesheet.
+        let html = r#"<div style="width:760px">
+          <div style="float:right"><div style="width:312px;max-width:312px"><div><div style="width:310px;max-width:310px"><div>The Arctic Circle, currently at roughly 66 degrees north of the Equator, defines the boundary of the Arctic seas and lands, plus several extra words so the unwrapped caption is far wider than the viewport</div></div></div></div></div>
+          <p>The Arctic is a polar region located at the northernmost part of Earth, around the North Pole, and consists of the Arctic Ocean and adjacent seas</p>
+        </div>"#;
+        let mut doc = parse_html(html);
+        let ctx = headless_ctx();
+        crate::css::stylo::style_document_stylo(&mut doc, &NullProvider, None, crate::Theme::Light, 1000.0, Some(&ctx));
+        let mut fonts = FontCtx::new(ctx, 1.0);
+        let (tree, _size) = layout_document(&doc, &mut fonts, 800.0, 1.0);
+
+        // The lead paragraph holds many fragments; if the float collapsed it, its
+        // content box would be near-zero-wide. A healthy band (760 minus the ~312
+        // float) is several hundred px. The bug produced ~0.
+        let root = tree.root.expect("root");
+        let mut worst = f32::INFINITY;
+        fn min_para_width(tree: &LayoutTree, idx: usize, worst: &mut f32) {
+            let b = &tree.boxes[idx];
+            if b.inline_fragments.len() > 3 {
+                *worst = worst.min(b.content_rect.width());
+            }
+            for &c in &b.children {
+                min_para_width(tree, c, worst);
+            }
+        }
+        min_para_width(&tree, root, &mut worst);
+        assert!(
+            worst > 200.0,
+            "a text block was squeezed to {worst:.1}px wide (float failed to shrink-to-fit)"
+        );
+    }
+
+    #[test]
     fn article_lays_out_without_panic() {
         let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/wiki-sample"));
         let html = std::fs::read_to_string(dir.join("article.html")).expect("read article.html");

@@ -610,16 +610,49 @@ pub fn intrinsic_block(
     tree: &LayoutTree,
     idx: usize,
 ) -> ContentSizes {
+    let style = box_style(doc, tree, idx);
+    let zoom = fonts.zoom();
+    let bp_h = horizontal_bp(&style, zoom);
+    // A definite `max-width` (Length) caps this box's border-box contribution.
+    let cap = match style.max_width {
+        Some(LengthOrPercent::Length(l)) => box_sizing_content(length_px(l) * zoom, bp_h, &style).max(0.0) + bp_h,
+        _ => f32::INFINITY,
+    };
+
+    // A definite width fixes this box's intrinsic contribution: its descendants
+    // wrap within it and cannot widen a shrink-to-fit ancestor (a float,
+    // inline-block, or absolute box). Without this, a fixed-width thumbnail
+    // (`div.thumbinner` at `width:312px`) reported its caption's UNWRAPPED width,
+    // so the right-floated `div.thumb` wrapping it grew to ~viewport width and
+    // squeezed the lead paragraph to one glyph per line (the "Arctic" bug).
+    if let LengthPercentOrAuto::Length(l) = style.width {
+        let w = (box_sizing_content(length_px(l) * zoom, bp_h, &style).max(0.0) + bp_h).min(cap);
+        return ContentSizes { min_content: w, max_content: w };
+    }
+
     let kids = tree.boxes[idx].children.clone();
-    if !kids.is_empty() && kids.iter().all(|&c| is_inline_level(tree, c)) {
+    let mut cs = if !kids.is_empty() && kids.iter().all(|&c| is_inline_level(tree, c)) {
         let items = collect_inline_items(tree, doc, &kids);
-        return super::inline::intrinsic_inline(doc, fonts, tree, &items);
-    }
-    let mut acc = ContentSizes::ZERO;
-    for c in kids {
-        acc = acc.max(intrinsic_block(doc, fonts, tree, c));
-    }
-    acc
+        super::inline::intrinsic_inline(doc, fonts, tree, &items)
+    } else {
+        let mut acc = ContentSizes::ZERO;
+        for c in kids {
+            acc = acc.max(intrinsic_block(doc, fonts, tree, c));
+        }
+        acc
+    };
+
+    // `max-width` likewise caps a shrink-to-fit ancestor's view of this subtree.
+    cs.max_content = cs.max_content.min(cap);
+    cs.min_content = cs.min_content.min(cap);
+    cs
+}
+
+/// Horizontal border + padding from a computed style (percent padding resolves
+/// to 0 here — the containing-block width is not known at intrinsic time).
+fn horizontal_bp(style: &ComputedStyle, zoom: f32) -> f32 {
+    let bw = style.border_width;
+    (bw.left + bw.right) * zoom + lp_px(style.padding.left, 0.0, zoom) + lp_px(style.padding.right, 0.0, zoom)
 }
 
 /// Keep the `Length`/`NodeId` imports referenced if width paths shrink.
