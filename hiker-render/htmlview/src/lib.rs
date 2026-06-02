@@ -73,6 +73,9 @@ pub struct HtmlView {
     /// (theme, zoom) the current caches were built with.
     cache_theme: Theme,
     cache_zoom: f32,
+    /// Count of times the expensive layout pipeline actually ran (cache misses).
+    /// Profiling aid: during pure scrolling this should not increase.
+    layout_runs: usize,
     /// Viewport width (CSS px) the styled `document` was cascaded at, so width
     /// media features (`min-width`/`max-width`) can be re-evaluated when the
     /// width crosses a responsive breakpoint.
@@ -98,6 +101,7 @@ impl HtmlView {
             content_size: egui::Vec2::ZERO,
             cache_theme: Theme::default(),
             cache_zoom: 1.0,
+            layout_runs: 0,
             cascade_width: None,
         }
     }
@@ -190,6 +194,7 @@ impl HtmlView {
             DisplayList::build(&tree, doc, &textures, page_bg_color(self.theme), bg_size);
 
         // (4) Cache.
+        self.layout_runs += 1;
         self.layout_cache = Some(tree);
         self.display_list = Some(display_list);
         self.last_width = Some(width);
@@ -203,19 +208,22 @@ impl HtmlView {
     /// Paint into the host painter. `origin` = document (0,0) in screen space;
     /// only shapes intersecting `clip_rect` are emitted (cheap viewport culling).
     pub fn paint(&self, painter: &egui::Painter, origin: egui::Pos2, clip_rect: egui::Rect) {
-        let Some(dl) = self.display_list.as_ref() else {
-            return;
-        };
-        let offset = origin.to_vec2();
-        for shape in &dl.shapes {
-            let bounds = shape.visual_bounding_rect().translate(offset);
-            if !bounds.intersects(clip_rect) {
-                continue;
-            }
-            let mut s = shape.clone();
-            s.translate(offset);
-            painter.add(s);
+        if let Some(dl) = self.display_list.as_ref() {
+            dl.paint_into(painter, origin.to_vec2(), clip_rect);
         }
+    }
+
+    /// Number of shapes in the built display list (0 before layout). Exposed for
+    /// profiling: `paint()` currently iterates all of these every frame.
+    pub fn shape_count(&self) -> usize {
+        self.display_list.as_ref().map_or(0, |dl| dl.shapes.len())
+    }
+
+    /// How many times the expensive layout pipeline has run (cache misses).
+    /// Should stay constant while only scrolling; if it climbs per frame, the
+    /// `width` passed to [`Self::layout`] is jittering and thrashing the cache.
+    pub fn layout_runs(&self) -> usize {
+        self.layout_runs
     }
 
     /// The href of the link at `doc_point` (document coordinates), if any.

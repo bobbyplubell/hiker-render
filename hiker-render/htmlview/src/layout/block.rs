@@ -320,11 +320,19 @@ fn layout_float(
     let outer_h = provisional.y.max(0.0);
 
     // Find the real placement, dropping down past existing floats as needed.
+    // A float with `clear` starts no higher than the bottom of the cleared
+    // floats (e.g. Wikipedia infoboxes use `float:right; clear:right` so they
+    // stack vertically instead of packing side-by-side).
+    let start_y = if style.clear != Clear::None {
+        cb.floats.clearance(style.clear, flow_y)
+    } else {
+        flow_y
+    };
     let _ = MAX_FLOAT_ITERS; // documented cap; the search loop lives in fm.place.
     let place = cb.floats.place(
         egui::vec2(outer_w, outer_h),
         side,
-        flow_y,
+        start_y,
         content_left,
         content_right,
     );

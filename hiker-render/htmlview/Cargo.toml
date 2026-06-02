@@ -29,7 +29,8 @@ app_units = "0.7.5"
 url = "2"
 
 [dev-dependencies]
-eframe = "0.32"
+# `wgpu` feature so the scroll_bench example can A/B the glow vs wgpu backend.
+eframe = { version = "0.32", features = ["glow", "wgpu"] }
 egui_kittest = { version = "0.32", features = ["snapshot", "wgpu"] }
 
 [[example]]

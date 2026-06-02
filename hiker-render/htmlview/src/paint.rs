@@ -32,6 +32,18 @@ pub type TextureMap = HashMap<NodeId, TextureId>;
 pub struct DisplayList {
     pub shapes: Vec<egui::Shape>,
     pub links: Vec<(egui::Rect, String)>,
+    /// Per-shape visual bounding rect (document space), computed once at build
+    /// so `paint()` never recomputes `visual_bounding_rect()` (expensive on text
+    /// shapes) on every scroll frame.
+    bboxes: Vec<egui::Rect>,
+    /// Y-banded spatial index: `bands[b]` lists (in paint order) the shape
+    /// indices whose bbox overlaps band `b`. Lets `paint()` touch only the
+    /// shapes near the viewport instead of all N every frame.
+    bands: Vec<Vec<u32>>,
+    /// Shapes whose bbox is non-finite (can't be culled) — always emitted.
+    always: Vec<u32>,
+    band_h: f32,
+    origin_y: f32,
 }
 
 impl DisplayList {
@@ -78,7 +90,92 @@ impl DisplayList {
             };
             b.paint_box(root);
         }
+        dl.build_index();
         dl
+    }
+
+    /// Build the per-shape bbox cache + Y-band spatial index from `shapes`.
+    fn build_index(&mut self) {
+        self.bboxes = self
+            .shapes
+            .iter()
+            .map(|s| s.visual_bounding_rect())
+            .collect();
+        self.bands.clear();
+        self.always.clear();
+        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+        for r in &self.bboxes {
+            if r.min.y.is_finite() && r.max.y.is_finite() {
+                min_y = min_y.min(r.min.y);
+                max_y = max_y.max(r.max.y);
+            }
+        }
+        if !min_y.is_finite() || !max_y.is_finite() {
+            return; // no finite shapes → paint falls back to a linear scan
+        }
+        self.origin_y = min_y;
+        self.band_h = 1024.0;
+        let nbands = (((max_y - min_y) / self.band_h).ceil() as usize).max(1);
+        self.bands = vec![Vec::new(); nbands];
+        let band_of = |y: f32| {
+            (((y - min_y) / self.band_h) as usize).min(nbands - 1)
+        };
+        for (i, r) in self.bboxes.iter().enumerate() {
+            if !(r.min.y.is_finite() && r.max.y.is_finite()) {
+                self.always.push(i as u32);
+                continue;
+            }
+            let (b0, b1) = (band_of(r.min.y), band_of(r.max.y));
+            for band in &mut self.bands[b0..=b1] {
+                band.push(i as u32);
+            }
+        }
+    }
+
+    /// Paint the shapes intersecting `clip_rect` into `painter`, where `offset`
+    /// maps document space to screen space (document (0,0) → `offset`). Uses the
+    /// Y-band index so cost is O(visible) per frame, not O(total shapes).
+    pub fn paint_into(&self, painter: &egui::Painter, offset: egui::Vec2, clip_rect: egui::Rect) {
+        let emit = |i: usize| {
+            let mut s = self.shapes[i].clone();
+            s.translate(offset);
+            painter.add(s);
+        };
+
+        // Fallback: no usable index (e.g. all shapes non-finite) → linear scan.
+        if self.bands.is_empty() || self.band_h <= 0.0 {
+            for i in 0..self.shapes.len() {
+                let bb = self.bboxes.get(i).copied().unwrap_or(clip_rect);
+                if bb.translate(offset).intersects(clip_rect) {
+                    emit(i);
+                }
+            }
+            return;
+        }
+
+        // Candidate set = shapes in the bands the viewport covers (+ uncullable).
+        let nbands = self.bands.len();
+        let cy0 = clip_rect.min.y - offset.y;
+        let cy1 = clip_rect.max.y - offset.y;
+        let band_of = |y: f32| {
+            (((y - self.origin_y) / self.band_h).floor()).clamp(0.0, (nbands - 1) as f32) as usize
+        };
+        let (b0, b1) = (band_of(cy0), band_of(cy1));
+
+        let mut cand: Vec<u32> = Vec::with_capacity(256);
+        for band in &self.bands[b0..=b1] {
+            cand.extend_from_slice(band);
+        }
+        cand.extend_from_slice(&self.always);
+        cand.sort_unstable();
+        cand.dedup();
+
+        for &i in &cand {
+            let i = i as usize;
+            if self.bboxes[i].translate(offset).intersects(clip_rect) {
+                emit(i);
+            }
+        }
     }
 }
 
