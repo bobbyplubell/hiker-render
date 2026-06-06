@@ -23,7 +23,7 @@ use crate::geom::Vec2;
 use super::construct::style_for;
 use super::float::FloatManager;
 use super::fonts::{allows_wrap, collapses_whitespace, FontCtx};
-use super::{InlineFragment, LayoutTree};
+use super::boxtree::{InlineFragment, LayoutTree};
 
 /// Cap on dropping a line below floats to find a wide-enough band.
 const MAX_LINE_DROP_ITERS: usize = 1000;

@@ -18,9 +18,7 @@
 
 mod box_layout;
 mod color;
-mod delim;
-mod glyph;
-mod macros;
+pub mod macros;
 mod svg;
 
 /// Math layout style: inline (`\textstyle`) vs. display (`\displaystyle`).

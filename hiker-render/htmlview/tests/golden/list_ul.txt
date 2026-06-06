@@ -1,0 +1,26 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=57.6}
+  content:{x=0 y=0 w=800 h=57.6}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=57.6}
+    content:{x=8 y=8 w=784 h=57.6} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] ul Block/Block rect:{x=8 y=24 w=784 h=57.6}
+      content:{x=48 y=24 w=744 h=57.6} margin:[16 0 16 0] padding:[0 0 0 40]
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      [3] li Block/Block rect:{x=48 y=24 w=744 h=19.2}
+        content:{x=48 y=24 w=744 h=19.2}
+        style: display=ListItem color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(48,24) "first" color=#000000ff
+        [4] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+      [5] li Block/Block rect:{x=48 y=43.2 w=744 h=19.2}
+        content:{x=48 y=43.2 w=744 h=19.2}
+        style: display=ListItem color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(48,43.2) "second" color=#000000ff
+        [6] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+      [7] li Block/Block rect:{x=48 y=62.4 w=744 h=19.2}
+        content:{x=48 y=62.4 w=744 h=19.2}
+        style: display=ListItem color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(48,62.4) "third" color=#000000ff
+        [8] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}

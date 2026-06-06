@@ -14,7 +14,7 @@ use crate::geom::{Edges, Rect};
 
 use super::fonts::FontCtx;
 use super::inline::InlineItem;
-use super::{BoxKind, FormattingContext, LayoutBox, LayoutTree};
+use super::boxtree::{BoxKind, FormattingContext, LayoutBox, LayoutTree};
 
 /// Build a layout-box tree rooted at the rendered subtree of `doc`.
 ///

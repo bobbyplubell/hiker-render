@@ -1,0 +1,31 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=105.6}
+  content:{x=0 y=0 w=800 h=105.6}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=105.6}
+    content:{x=8 y=8 w=784 h=105.6} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] div Block/Block rect:{x=8 y=8 w=300 h=105.6}
+      content:{x=8 y=8 w=300 h=105.6}
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      [3] p Block/Block rect:{x=8 y=24 w=300 h=19.2}
+        content:{x=8 y=24 w=300 h=19.2} margin:[16 0 16 0]
+        style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(8,24) "Lead" color=#000000ff
+        text @(46.03,24) "paragraph." color=#000000ff
+        [4] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]
+      [5] div Block/Block rect:{x=8 y=59.2 w=300 h=35.2}
+        content:{x=16 y=67.2 w=284 h=19.2} padding:[8 8 8 8]
+        style: display=Block color=#000000ff bg=#eeeeeeff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(16,67.2) "A" color=#000000ff
+        text @(29.94,67.2) "boxed" color=#000000ff
+        text @(77.97,67.2) "note" color=#000000ff
+        text @(114.44,67.2) "inside." color=#000000ff
+        [6] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} padding:[8 8 8 8]
+      [7] p Block/Block rect:{x=8 y=110.4 w=300 h=19.2}
+        content:{x=8 y=110.4 w=300 h=19.2} margin:[16 0 16 0]
+        style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(8,110.4) "Trailing" color=#000000ff
+        text @(64.84,110.4) "paragraph." color=#000000ff
+        [8] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]

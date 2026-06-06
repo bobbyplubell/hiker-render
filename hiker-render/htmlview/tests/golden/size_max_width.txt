@@ -1,0 +1,19 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=76.8}
+  content:{x=0 y=0 w=800 h=76.8}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=76.8}
+    content:{x=8 y=8 w=784 h=76.8} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] div Block/Block rect:{x=8 y=8 w=150 h=76.8}
+      content:{x=8 y=8 w=150 h=76.8}
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      text @(8,8) "content" color=#000000ff
+      text @(66.88,8) "limited" color=#000000ff
+      text @(120.91,8) "by" color=#000000ff
+      text @(8,27.2) "max-width" color=#000000ff
+      text @(86.78,27.2) "even" color=#000000ff
+      text @(8,46.4) "though" color=#000000ff
+      text @(62.78,46.4) "available" color=#000000ff
+      text @(128.25,46.4) "is" color=#000000ff
+      text @(8,65.6) "wider" color=#000000ff
+      [3] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0}

@@ -1,0 +1,61 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=215.5}
+  content:{x=0 y=0 w=800 h=215.5}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=215.5}
+    content:{x=8 y=8 w=784 h=215.5} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] div Block/Block rect:{x=8 y=8 w=354 h=215.5}
+      content:{x=25 y=25 w=320 h=181.5} padding:[16 16 16 16] border:[1 1 1 1]
+      style: display=Block color=#000000ff bg=#fafafaff font-size=16 weight=400 text-align=Left white-space=Normal
+      [14] (anon) Block/Inline rect:{x=25 y=25 w=320 h=0}
+        content:{x=25 y=25 w=320 h=0}
+        [3] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} padding:[16 16 16 16] border:[1 1 1 1]
+      [4] h3 Block/Block rect:{x=25 y=25 w=320 h=22.46}
+        content:{x=25 y=25 w=320 h=22.46} margin:[0 0 18.72 0]
+        style: display=Block color=#000000ff font-size=18.72 weight=700 text-align=Left white-space=Normal
+        text @(25,25) "Card" color=#000000ff
+        text @(68.19,25) "Heading" color=#000000ff
+        [5] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} margin:[0 0 18.72 0]
+      [15] (anon) Block/Inline rect:{x=25 y=84.9 w=320 h=0}
+        content:{x=25 y=84.9 w=320 h=0}
+        [6] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} padding:[16 16 16 16] border:[1 1 1 1]
+      [7] p Block/Block rect:{x=25 y=100.9 w=320 h=38.4}
+        content:{x=25 y=100.9 w=320 h=38.4} margin:[16 0 16 0]
+        style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(25,100.9) "Card" color=#000000ff
+        text @(62.03,100.9) "body" color=#000000ff
+        text @(100.31,100.9) "copy" color=#000000ff
+        text @(136.59,100.9) "describing" color=#000000ff
+        text @(213.44,100.9) "the" color=#000000ff
+        text @(240.91,100.9) "thing" color=#000000ff
+        text @(281.75,100.9) "in" color=#000000ff
+        text @(298.53,100.9) "a" color=#000000ff
+        text @(25,120.1) "couple" color=#000000ff
+        text @(75.47,120.1) "of" color=#000000ff
+        text @(94.16,120.1) "sentences" color=#000000ff
+        text @(169.69,120.1) "that" color=#000000ff
+        text @(202.56,120.1) "will" color=#000000ff
+        text @(230.31,120.1) "wrap." color=#000000ff
+        [8] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]
+      [16] (anon) Block/Inline rect:{x=25 y=155.3 w=320 h=0}
+        content:{x=25 y=155.3 w=320 h=0}
+        [9] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} padding:[16 16 16 16] border:[1 1 1 1]
+      [10] p Block/Block rect:{x=25 y=171.3 w=320 h=19.2}
+        content:{x=25 y=171.3 w=320 h=19.2} margin:[16 0 16 0]
+        style: display=Block color=#000000ff font-size=16 weight=400 text-align=Right white-space=Normal
+        text @(267.16,171.3) "Read" color=#0645adff underline
+        text @(303.53,171.3) " " color=#0645adff underline
+        text @(307.19,171.3) "more" color=#0645adff underline
+        [11] a Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+          style: display=Inline color=#0645adff font-size=16 weight=400 text-align=Right underline white-space=Normal
+          [12] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+            content:{x=0 y=0 w=0 h=0}
+      [17] (anon) Block/Inline rect:{x=25 y=206.5 w=320 h=0}
+        content:{x=25 y=206.5 w=320 h=0}
+        [13] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} padding:[16 16 16 16] border:[1 1 1 1]

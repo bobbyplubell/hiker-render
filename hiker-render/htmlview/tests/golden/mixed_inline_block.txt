@@ -1,0 +1,22 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=40}
+  content:{x=0 y=0 w=800 h=40}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=40}
+    content:{x=8 y=8 w=784 h=40} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] div Block/Block rect:{x=8 y=8 w=784 h=40}
+      content:{x=8 y=8 w=784 h=40}
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      inline-box -> #3
+      inline-box -> #5
+      [3] span InlineBlock/Block rect:{x=8 y=8 w=80 h=40}
+        content:{x=8 y=8 w=80 h=40}
+        style: display=InlineBlock color=#000000ff bg=#ddddddff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(8,8) "A" color=#000000ff
+        [4] #text Inline/Inline rect:{x=8 y=8 w=0 h=0}
+          content:{x=8 y=8 w=0 h=0}
+      [5] span InlineBlock/Block rect:{x=88 y=8 w=80 h=40}
+        content:{x=88 y=8 w=80 h=40}
+        style: display=InlineBlock color=#000000ff bg=#bbbbbbff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(88,8) "B" color=#000000ff
+        [6] #text Inline/Inline rect:{x=88 y=8 w=0 h=0}
+          content:{x=88 y=8 w=0 h=0}

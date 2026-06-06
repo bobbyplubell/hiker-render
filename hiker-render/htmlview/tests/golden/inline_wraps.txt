@@ -1,0 +1,22 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=57.6}
+  content:{x=0 y=0 w=800 h=57.6}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=57.6}
+    content:{x=8 y=8 w=784 h=57.6} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] p Block/Block rect:{x=8 y=24 w=200 h=57.6}
+      content:{x=8 y=24 w=200 h=57.6} margin:[16 0 16 0]
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      text @(8,24) "the" color=#000000ff
+      text @(35.47,24) "quick" color=#000000ff
+      text @(76.06,24) "brown" color=#000000ff
+      text @(124.84,24) "fox" color=#000000ff
+      text @(151.5,24) "jumps" color=#000000ff
+      text @(8,43.2) "over" color=#000000ff
+      text @(43.66,43.2) "the" color=#000000ff
+      text @(71.13,43.2) "lazy" color=#000000ff
+      text @(101.41,43.2) "dog" color=#000000ff
+      text @(132.25,43.2) "again" color=#000000ff
+      text @(174.03,43.2) "and" color=#000000ff
+      text @(8,62.4) "again" color=#000000ff
+      [3] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]

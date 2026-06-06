@@ -1,0 +1,36 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=19.2}
+  content:{x=0 y=0 w=800 h=19.2}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=19.2}
+    content:{x=8 y=8 w=784 h=19.2} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] p Block/Block rect:{x=8 y=24 w=784 h=19.2}
+      content:{x=8 y=24 w=784 h=19.2} margin:[16 0 16 0]
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      text @(8,24) "normal" color=#000000ff
+      text @(65.41,24) "bold" color=#000000ff
+      text @(100.44,24) "italic" color=#000000ff
+      text @(137.47,24) "both" color=#000000ff
+      [3] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]
+      [4] b Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0}
+        style: display=Inline color=#000000ff font-size=16 weight=700 text-align=Left white-space=Normal
+        [5] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+      [6] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]
+      [7] i Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0}
+        style: display=Inline color=#000000ff font-size=16 weight=400 style=Italic text-align=Left white-space=Normal
+        [8] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+      [9] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]
+      [10] b Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0}
+        style: display=Inline color=#000000ff font-size=16 weight=700 text-align=Left white-space=Normal
+        [11] i Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+          style: display=Inline color=#000000ff font-size=16 weight=700 style=Italic text-align=Left white-space=Normal
+          [12] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+            content:{x=0 y=0 w=0 h=0}

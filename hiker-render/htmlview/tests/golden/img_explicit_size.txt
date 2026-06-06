@@ -1,0 +1,18 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=52.09}
+  content:{x=0 y=0 w=800 h=52.09}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=52.09}
+    content:{x=8 y=8 w=784 h=52.09} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] p Block/Block rect:{x=8 y=24 w=784 h=52.09}
+      content:{x=8 y=24 w=784 h=52.09} margin:[16 0 16 0]
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      text @(8,56.89) "before" color=#000000ff
+      inline-box -> #4
+      text @(130.78,56.89) "after" color=#000000ff
+      [3] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]
+      [4] img Replaced/Replaced rect:{x=63.13 y=24 w=64 h=48}
+        content:{x=63.13 y=24 w=64 h=48}
+        style: display=InlineBlock color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      [5] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]

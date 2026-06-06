@@ -1,0 +1,16 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=19.2}
+  content:{x=0 y=0 w=800 h=19.2}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=19.2}
+    content:{x=8 y=8 w=784 h=19.2} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] blockquote Block/Block rect:{x=48 y=24 w=704 h=19.2}
+      content:{x=48 y=24 w=704 h=19.2} margin:[16 40 16 40]
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      [3] p Block/Block rect:{x=48 y=40 w=704 h=19.2}
+        content:{x=48 y=40 w=704 h=19.2} margin:[16 0 16 0]
+        style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        text @(48,40) "Quoted" color=#000000ff
+        text @(106.03,40) "text" color=#000000ff
+        text @(138.91,40) "here." color=#000000ff
+        [4] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]

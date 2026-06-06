@@ -41,8 +41,7 @@ use crate::geom::{Rect, Vec2};
 use super::construct::{collect_inline_items, length_px, style_for};
 use super::float::{FloatManager, Side};
 use super::fonts::FontCtx;
-use super::inline::layout_inline;
-use super::{BoxKind, ContentSizes, LayoutTree};
+use super::LayoutTree;
 
 /// Cap on the float "drop down" search — belt-and-braces; the FloatManager has
 /// its own internal cap too. Guarantees termination on pathological pages.
@@ -59,7 +58,7 @@ pub struct BlockCtx<'a> {
 /// size (width, height). Sets `rect`/`content_rect` on the box and recurses.
 ///
 /// This is the public entry (root, table cells): it establishes a *fresh* float
-/// context. Children are laid out within it via [`layout_block_inner`].
+/// context. Children are laid out within it via [`layout_block_descend`].
 pub fn layout_block_box(
     doc: &Document,
     fonts: &FontCtx,
@@ -72,7 +71,7 @@ pub fn layout_block_box(
     let mut floats = FloatManager::new();
     let mut cb = BlockCtx { floats: &mut floats };
     // This box established the fresh manager, so it owns float-containment.
-    layout_block_inner(doc, fonts, tree, idx, cb_width, x, y, &mut cb, true)
+    layout_block_descend(doc, fonts, tree, idx, cb_width, x, y, &mut cb, true)
 }
 
 /// Lay out a block box within an existing float context `cb`.
@@ -84,7 +83,7 @@ pub fn layout_block_box(
 /// wrappers, ordinary nested blocks) must NOT — otherwise they'd absorb the full
 /// height of a sibling float and push following content below it.
 #[allow(clippy::too_many_arguments)]
-pub fn layout_block_inner(
+pub fn layout_block_descend(
     doc: &Document,
     fonts: &FontCtx,
     tree: &mut LayoutTree,
@@ -97,7 +96,7 @@ pub fn layout_block_inner(
 ) -> Vec2 {
     // Tables run their own formatting context (grid + auto column widths). Cells
     // inside establish their own float context (handled in table.rs).
-    if tree.boxes[idx].kind == BoxKind::Table {
+    if tree.boxes[idx].kind == super::BoxKind::Table {
         return super::table::layout_table_box(doc, fonts, tree, idx, cb_width, x, y);
     }
 
@@ -108,7 +107,7 @@ pub fn layout_block_inner(
     resolve_horizontal_edges(&mut tree.boxes[idx], &style, cb_width, zoom);
 
     let m = tree.boxes[idx].margin;
-    let bp_h = tree.boxes[idx].inline_extra();
+    let bp_h = tree.boxes[idx].border_padding_inline();
 
     // --- width resolution (border-box width) ---
     let avail_inner = (cb_width - m.horizontal()).max(0.0);
@@ -124,7 +123,7 @@ pub fn layout_block_inner(
     if tree.boxes[idx].fc == super::FormattingContext::Replaced {
         let (w, h) = replaced_size(&style, content_width, zoom);
         let border_w = w + bp_h;
-        let border_h = h + tree.boxes[idx].block_extra();
+        let border_h = h + tree.boxes[idx].border_padding_block();
         set_rects(tree, idx, x + m.left, y + m.top, border_w, border_h, content_x, content_y_origin, w, h);
         return Vec2::new(border_w, border_h);
     }
@@ -155,7 +154,7 @@ pub fn layout_block_inner(
         let items = collect_inline_items(tree, doc, &kids);
         // IFC lays out relative to (0,0); float bands are queried in document
         // coords, so pass the content origin to shift the query frame.
-        let layout = layout_inline(
+        let layout = super::inline::layout_inline(
             doc,
             fonts,
             tree,
@@ -230,7 +229,7 @@ pub fn layout_block_inner(
                 // Fresh float context: floats inside don't escape.
                 layout_block_box(doc, fonts, tree, c, child_cb_width, child_x, cursor)
             } else {
-                layout_block_inner(doc, fonts, tree, c, child_cb_width, child_x, cursor, cb, false)
+                layout_block_descend(doc, fonts, tree, c, child_cb_width, child_x, cursor, cb, false)
             };
             // `used` is the border-box height; advance past it plus this child's
             // bottom margin (collapsing handled at next iteration's top).
@@ -258,7 +257,7 @@ pub fn layout_block_inner(
     };
     let auto_h = content_height.max(floats_height);
     let final_content_h = explicit_h.unwrap_or(auto_h);
-    let bp_v = tree.boxes[idx].block_extra();
+    let bp_v = tree.boxes[idx].border_padding_block();
     let border_box_h = final_content_h + bp_v;
 
     set_rects(
@@ -442,12 +441,15 @@ fn box_style(doc: &Document, tree: &LayoutTree, idx: usize) -> ComputedStyle {
 fn is_inline_level(tree: &LayoutTree, idx: usize) -> bool {
     matches!(
         tree.boxes[idx].kind,
-        BoxKind::Inline | BoxKind::InlineBlock | BoxKind::Replaced
+        super::BoxKind::Inline | super::BoxKind::InlineBlock | super::BoxKind::Replaced
     ) || tree.boxes[idx].is_br
 }
 
 fn is_atomic(tree: &LayoutTree, idx: usize) -> bool {
-    matches!(tree.boxes[idx].kind, BoxKind::InlineBlock | BoxKind::Replaced)
+    matches!(
+        tree.boxes[idx].kind,
+        super::BoxKind::InlineBlock | super::BoxKind::Replaced
+    )
 }
 
 /// Resolve percentage-based horizontal margins/padding now that cb_width known.
@@ -533,10 +535,10 @@ fn size_inline_atomics(
     let kids: Vec<usize> = tree.boxes[idx].children.clone();
     for c in kids {
         match tree.boxes[c].kind {
-            BoxKind::Replaced | BoxKind::InlineBlock => {
+            super::BoxKind::Replaced | super::BoxKind::InlineBlock => {
                 layout_block_box(doc, fonts, tree, c, content_width, 0.0, 0.0);
             }
-            BoxKind::Inline => size_inline_atomics(doc, fonts, tree, c, content_width),
+            super::BoxKind::Inline => size_inline_atomics(doc, fonts, tree, c, content_width),
             _ => {}
         }
     }
@@ -617,7 +619,7 @@ pub fn intrinsic_block(
     fonts: &FontCtx,
     tree: &LayoutTree,
     idx: usize,
-) -> ContentSizes {
+) -> super::ContentSizes {
     let style = box_style(doc, tree, idx);
     let zoom = fonts.zoom();
     let bp_h = horizontal_bp(&style, zoom);
@@ -635,7 +637,7 @@ pub fn intrinsic_block(
     // squeezed the lead paragraph to one glyph per line (the "Arctic" bug).
     if let LengthPercentOrAuto::Length(l) = style.width {
         let w = (box_sizing_content(length_px(l) * zoom, bp_h, &style).max(0.0) + bp_h).min(cap);
-        return ContentSizes { min_content: w, max_content: w };
+        return super::ContentSizes { min_content: w, max_content: w };
     }
 
     let kids = tree.boxes[idx].children.clone();
@@ -643,7 +645,7 @@ pub fn intrinsic_block(
         let items = collect_inline_items(tree, doc, &kids);
         super::inline::intrinsic_inline(doc, fonts, tree, &items)
     } else {
-        let mut acc = ContentSizes::ZERO;
+        let mut acc = super::ContentSizes::ZERO;
         for c in kids {
             acc = acc.max(intrinsic_block(doc, fonts, tree, c));
         }

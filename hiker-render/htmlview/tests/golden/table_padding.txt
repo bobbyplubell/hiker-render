@@ -1,0 +1,18 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=82.4}
+  content:{x=0 y=0 w=800 h=82.4}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=82.4}
+    content:{x=8 y=8 w=784 h=82.4} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] table Table/Block rect:{x=8 y=8 w=105.13 h=82.4}
+      content:{x=8 y=8 w=105.13 h=82.4}
+      style: display=Table color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      [9] tr TableRow/Block rect:{x=10 y=10 w=101.13 h=78.4}
+        content:{x=10 y=10 w=101.13 h=78.4}
+        style: display=TableRow color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        [7] td TableCell/Block rect:{x=10 y=10 w=101.13 h=78.4}
+          content:{x=20 y=20 w=81.13 h=58.4} padding:[10 10 10 10]
+          style: display=TableCell color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+          text @(30,30) "padded" color=#000000ff
+          text @(30,49.2) "cell" color=#000000ff
+          [8] #text Inline/Inline rect:{x=20 y=20 w=0 h=0}
+            content:{x=20 y=20 w=0 h=0} padding:[10 10 10 10]

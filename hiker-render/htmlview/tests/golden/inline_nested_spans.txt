@@ -1,0 +1,29 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=19.2}
+  content:{x=0 y=0 w=800 h=19.2}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=19.2}
+    content:{x=8 y=8 w=784 h=19.2} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] p Block/Block rect:{x=8 y=24 w=784 h=19.2}
+      content:{x=8 y=24 w=784 h=19.2} margin:[16 0 16 0]
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      text @(8,24) "a" color=#000000ff
+      text @(23.5,24) "b" color=#000000ff
+      text @(40.19,24) "c" color=#000000ff
+      text @(51.22,24) "d" color=#000000ff
+      text @(64.25,24) "e" color=#000000ff
+      [3] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]
+      [4] span Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0}
+        style: display=Inline color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        [5] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+        [6] span Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+          style: display=Inline color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+          [7] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+            content:{x=0 y=0 w=0 h=0}
+        [8] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+      [9] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[16 0 16 0]

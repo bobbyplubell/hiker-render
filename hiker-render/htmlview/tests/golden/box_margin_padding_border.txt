@@ -1,0 +1,12 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=65.2}
+  content:{x=0 y=0 w=800 h=65.2}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=65.2}
+    content:{x=8 y=8 w=784 h=65.2} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] div Block/Block rect:{x=18 y=18 w=246 h=65.2}
+      content:{x=41 y=41 w=200 h=19.2} margin:[10 10 10 10] padding:[20 20 20 20] border:[3 3 3 3]
+      style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      text @(41,41) "all" color=#000000ff
+      text @(60.75,41) "three" color=#000000ff
+      [3] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+        content:{x=0 y=0 w=0 h=0} margin:[10 10 10 10] padding:[20 20 20 20] border:[3 3 3 3]

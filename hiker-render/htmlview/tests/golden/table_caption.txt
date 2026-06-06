@@ -1,0 +1,24 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=46.4}
+  content:{x=0 y=0 w=800 h=46.4}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=46.4}
+    content:{x=8 y=8 w=784 h=46.4} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] table Table/Block rect:{x=8 y=8 w=30.09 h=46.4}
+      content:{x=8 y=8 w=30.09 h=46.4}
+      style: display=Table color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      [9] caption Block/Block rect:{x=8 y=8 w=784 h=19.2}
+        content:{x=8 y=8 w=784 h=19.2}
+        style: display=TableCaption color=#000000ff font-size=16 weight=400 text-align=Center white-space=Normal
+        text @(357.2,8) "The" color=#000000ff
+        text @(387.67,8) "Caption" color=#000000ff
+        [10] #text Inline/Inline rect:{x=0 y=0 w=0 h=0}
+          content:{x=0 y=0 w=0 h=0}
+      [13] tr TableRow/Block rect:{x=10 y=29.2 w=26.09 h=23.2}
+        content:{x=10 y=29.2 w=26.09 h=23.2}
+        style: display=TableRow color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        [11] td TableCell/Block rect:{x=10 y=29.2 w=26.09 h=23.2}
+          content:{x=11 y=30.2 w=24.09 h=21.2} padding:[1 1 1 1]
+          style: display=TableCell color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+          text @(12,31.2) "cell" color=#000000ff
+          [12] #text Inline/Inline rect:{x=11 y=30.2 w=0 h=0}
+            content:{x=11 y=30.2 w=0 h=0} padding:[1 1 1 1]

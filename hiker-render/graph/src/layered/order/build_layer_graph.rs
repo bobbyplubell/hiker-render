@@ -17,7 +17,6 @@
 
 use super::graph::Graph;
 use super::{LayerGraphLabel, OrderEdge, OrderNode};
-use super::util;
 use crate::layered::types::{EdgeLabel, GraphLabel, NodeLabel};
 
 /// Which incident edges to copy into the layer graph.
@@ -32,7 +31,7 @@ pub type LayerGraph = Graph<LayerGraphLabel, OrderNode, OrderEdge>;
 
 fn create_root_node(graph: &Graph<GraphLabel, NodeLabel, EdgeLabel>) -> String {
     loop {
-        let v = util::unique_id("_root");
+        let v = super::util::unique_id("_root");
         if !graph.has_node(&v) {
             return v;
         }

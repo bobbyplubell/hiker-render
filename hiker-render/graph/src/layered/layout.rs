@@ -28,14 +28,11 @@
 use std::collections::HashMap;
 
 use super::graph::{Edge, Graph, GraphOptions};
+use super::order;
 use super::types::{
     DagreGraph, DummyKind, EdgeLabel, GraphLabel, LabelPos, NodeLabel, Point, RankDir,
 };
 use super::util::{self, Rect};
-use super::{
-    acyclic, add_border_segments, coordinate_system, nesting_graph, normalize, order,
-    parent_dummy_chains, position, rank,
-};
 
 /// Options for [`layout`] — TS `LayoutOptions` (the subset the pipeline reads).
 #[derive(Clone, Debug, Default)]
@@ -67,18 +64,18 @@ pub fn layout_with_opts(input_graph: &mut DagreGraph, opts: &LayoutOptions) {
 fn run_layout(g: &mut DagreGraph, opts: &LayoutOptions) {
     make_space_for_edge_labels(g);
     let self_edges = remove_self_edges(g);
-    acyclic::run(g);
-    nesting_graph::run(g);
+    super::acyclic::run(g);
+    super::nesting_graph::run(g);
     rank_pass(g);
     inject_edge_label_proxies(g);
     util::remove_empty_ranks(g);
-    nesting_graph::cleanup(g);
+    super::nesting_graph::cleanup(g);
     util::normalize_ranks(g);
     assign_rank_min_max(g);
     remove_edge_label_proxies(g);
-    normalize::run(g);
-    parent_dummy_chains::parent_dummy_chains(g);
-    add_border_segments::add_border_segments(g);
+    super::normalize::run(g);
+    super::parent_dummy_chains::parent_dummy_chains(g);
+    super::add_border_segments::add_border_segments(g);
     order::order(
         g,
         &order::OrderOptions {
@@ -87,17 +84,17 @@ fn run_layout(g: &mut DagreGraph, opts: &LayoutOptions) {
         },
     );
     insert_self_edges(g, self_edges);
-    coordinate_system::adjust(g);
-    position::position(g);
+    super::coordinate_system::adjust(g);
+    super::position::position(g);
     position_self_edges(g);
     remove_border_nodes(g);
-    normalize::undo(g);
+    super::normalize::undo(g);
     fixup_edge_label_coords(g);
-    coordinate_system::undo(g);
+    super::coordinate_system::undo(g);
     translate_graph(g);
     assign_node_intersects(g);
     reverse_points_for_reversed_edges(g);
-    acyclic::undo(g);
+    super::acyclic::undo(g);
 }
 
 /// Copies final layout information from the layout graph back to the input
@@ -239,7 +236,7 @@ fn make_space_for_edge_labels(g: &mut DagreGraph) {
 /// not shared refs), then copy each ranked node's `rank` back onto `g`.
 fn rank_pass(g: &mut DagreGraph) {
     let mut nc = util::as_non_compound_graph(g);
-    rank::rank(&mut nc);
+    super::rank::rank(&mut nc);
     for v in nc.nodes() {
         if let Some(rank) = nc.node(&v).and_then(|n| n.rank) {
             if let Some(node) = g.node_mut(&v) {

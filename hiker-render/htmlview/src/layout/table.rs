@@ -37,7 +37,7 @@ use crate::geom::{Edges, Rect, Vec2};
 use super::block::layout_block_box;
 use super::construct::{length_px, style_for};
 use super::fonts::FontCtx;
-use super::{BoxKind, ContentSizes, FormattingContext, LayoutBox, LayoutTree};
+use super::boxtree::{BoxKind, ContentSizes, FormattingContext, LayoutBox, LayoutTree};
 
 /// UA default `border-spacing` for `border-collapse: separate` (2px per axis).
 const DEFAULT_BORDER_SPACING: f32 = 2.0;
@@ -112,8 +112,8 @@ pub fn layout_table_box(
     // Resolve the table's own outer edges (percentages against cb_width).
     resolve_outer_edges(&mut tree.boxes[idx], &style, cb_width, zoom);
     let m = tree.boxes[idx].margin;
-    let bp_h = tree.boxes[idx].inline_extra();
-    let bp_v = tree.boxes[idx].block_extra();
+    let bp_h = tree.boxes[idx].border_padding_inline();
+    let bp_v = tree.boxes[idx].border_padding_block();
 
     // Content-area origin (document coords).
     let b = &tree.boxes[idx];
@@ -725,7 +725,7 @@ fn measure_node_children(doc: &Document, fonts: &FontCtx, node: NodeId) -> Conte
                 if d == Display::None {
                     continue;
                 }
-                let extra = horizontal_extra(doc, child, fonts.zoom());
+                let extra = horizontal_border_padding(doc, child, fonts.zoom());
                 match d {
                     Display::Inline => {
                         // Replaced inline (img) is atomic with a rough width.
@@ -790,7 +790,7 @@ fn measure_table_intrinsic(doc: &Document, fonts: &FontCtx, table: NodeId) -> Co
     }
 }
 
-fn horizontal_extra(doc: &Document, node: NodeId, zoom: f32) -> f32 {
+fn horizontal_border_padding(doc: &Document, node: NodeId, zoom: f32) -> f32 {
     let style = style_for(doc, node);
     let bw = style.border_width;
     let pad = style.padding;

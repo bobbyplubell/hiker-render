@@ -11,7 +11,6 @@
 
 #[path = "bricks.rs"]
 mod bricks;
-#[path = "wavelane.rs"]
 mod wavelane;
 
 use std::fmt::Write as _;

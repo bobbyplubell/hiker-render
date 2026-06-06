@@ -8,7 +8,6 @@
 
 use super::barycenter::{barycenter, BarycenterEntry};
 use super::build_layer_graph::LayerGraph;
-use super::graph::Graph;
 use super::resolve_conflicts::{resolve_conflicts, ResolvedEntry};
 use super::sort::{sort, SortResult};
 
@@ -16,7 +15,7 @@ use super::sort::{sort, SortResult};
 pub fn sort_subgraph<CgG, CgN, CgE>(
     graph: &LayerGraph,
     v: &str,
-    constraint_graph: &Graph<CgG, CgN, CgE>,
+    constraint_graph: &super::graph::Graph<CgG, CgN, CgE>,
     bias_right: bool,
 ) -> SortResult {
     use std::collections::HashMap;
@@ -110,7 +109,7 @@ fn merge_barycenters(target: &mut BarycenterEntry, other: &SortResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layered::graph::GraphOptions;
+    use crate::layered::graph::{Graph, GraphOptions};
     use crate::layered::order::{new_constraint_graph, OrderEdge, OrderNode};
 
     // Build a compound graph matching the TS sort-subgraph tests: default node

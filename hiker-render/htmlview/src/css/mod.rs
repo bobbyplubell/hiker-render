@@ -1,5 +1,6 @@
-//! CSS subsystem: value vocabulary, computed style, the Stylo cascade bridge,
-//! and the UA stylesheet.
+//! CSS subsystem: the value vocabulary ([`values`]), the resolved
+//! [`computed`] style layout reads, the [`stylo`] cascade bridge that produces
+//! it, and the built-in user-agent stylesheet ([`ua`]).
 
 pub mod computed;
 pub mod stylo;

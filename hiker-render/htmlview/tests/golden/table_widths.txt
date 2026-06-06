@@ -1,0 +1,24 @@
+[0] (anon) Block/Block rect:{x=0 y=0 w=800 h=27.2}
+  content:{x=0 y=0 w=800 h=27.2}
+  [1] body Block/Block rect:{x=8 y=8 w=784 h=27.2}
+    content:{x=8 y=8 w=784 h=27.2} margin:[8 8 8 8]
+    style: display=Block color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+    [2] table Table/Block rect:{x=8 y=8 w=400 h=27.2}
+      content:{x=8 y=8 w=400 h=27.2}
+      style: display=Table color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+      [13] tr TableRow/Block rect:{x=10 y=10 w=396 h=23.2}
+        content:{x=10 y=10 w=396 h=23.2}
+        style: display=TableRow color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+        [9] td TableCell/Block rect:{x=10 y=10 w=203.67 h=23.2}
+          content:{x=11 y=11 w=201.67 h=21.2} padding:[1 1 1 1]
+          style: display=TableCell color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+          text @(12,12) "narrow" color=#000000ff
+          [10] #text Inline/Inline rect:{x=11 y=11 w=0 h=0}
+            content:{x=11 y=11 w=0 h=0} padding:[1 1 1 1]
+        [11] td TableCell/Block rect:{x=215.67 y=10 w=190.33 h=23.2}
+          content:{x=216.67 y=11 w=188.33 h=21.2} padding:[1 1 1 1]
+          style: display=TableCell color=#000000ff font-size=16 weight=400 text-align=Left white-space=Normal
+          text @(217.67,12) "wide" color=#000000ff
+          text @(255.14,12) "remainder" color=#000000ff
+          [12] #text Inline/Inline rect:{x=216.67 y=11 w=0 h=0}
+            content:{x=216.67 y=11 w=0 h=0} padding:[1 1 1 1]
