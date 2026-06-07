@@ -334,6 +334,53 @@ mod tests {
     }
 
     #[test]
+    fn order_matches_dagre_on_ties_no_mirror() {
+        // Regression for the `order` tie-break mirror: dagre keeps the EARLIER
+        // ordering on equal-crossing sweeps, so the first successor of the root
+        // (node 1, via edge 0->1) sits LEFT of the second (node 2, edge 0->2).
+        // The port used to overwrite `best` on ties and flip this left<->right.
+        // These coordinates match real @dagrejs/dagre 1.1.4 exactly (verified by
+        // tools/dagre-compare). Same shape as the CUSTOMER/ORDER ER diagram that
+        // surfaced the bug.
+        let sizes = [
+            Vec2::new(100.0, 40.0),
+            Vec2::new(100.0, 40.0),
+            Vec2::new(100.0, 40.0),
+            Vec2::new(100.0, 40.0),
+        ];
+        let labels = [
+            Some(Vec2::new(30.0, 20.0)),
+            Some(Vec2::new(24.0, 20.0)),
+            None,
+            None,
+        ];
+        let edges = [(0u32, 1u32), (0, 2), (1, 3), (2, 3)];
+        let input = GraphInput {
+            node_count: 4,
+            edges: &edges,
+            node_sizes: Some(&sizes),
+            edge_label_sizes: Some(&labels),
+            node_parents: None,
+            directed: true,
+        };
+        let out = LayeredEngine::default().layout(&input);
+
+        // Node 1 (first successor) is left of node 2 — the mirror-sensitive fact.
+        assert!(
+            out.positions[1].x < out.positions[2].x,
+            "first successor must sit left: n1.x={} n2.x={}",
+            out.positions[1].x,
+            out.positions[2].x
+        );
+        // Exact dagre.js coordinates (symmetric diamond, source/sink centered).
+        assert_eq!(out.positions[0], Vec2::new(125.0, 20.0));
+        assert_eq!(out.positions[1], Vec2::new(50.0, 130.0));
+        assert_eq!(out.positions[2], Vec2::new(200.0, 130.0));
+        assert_eq!(out.positions[3], Vec2::new(125.0, 220.0));
+        assert_eq!(out.size, Vec2::new(250.0, 240.0));
+    }
+
+    #[test]
     fn duplicate_edges_map_positionally() {
         // Two parallel 0->1 edges plus a self-edge: routes stay aligned.
         let edges = [(0u32, 1u32), (0, 1), (1, 1)];

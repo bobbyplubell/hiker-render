@@ -163,12 +163,15 @@ pub fn order(graph: &mut DagreGraph, opts: &OrderOptions) {
 
         let layering = util::build_layer_matrix(graph);
         let cc = cross_count(graph, &layering);
+        // Match dagre's `order/index.js`: keep `best` ONLY on a strict
+        // improvement. On a tie dagre retains the EARLIER ordering — the
+        // alternating down/up + left/right-bias sweeps routinely produce
+        // equal-crossing *mirror-image* layouts, and overwriting on ties picks
+        // a later (often horizontally flipped) one, diverging from dagre.js.
         if cc < best_cc {
             last_best = 0;
             best = layering;
             best_cc = cc;
-        } else if cc == best_cc {
-            best = layering;
         }
         i += 1;
         last_best += 1;

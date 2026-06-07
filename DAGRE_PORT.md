@@ -62,3 +62,17 @@ the very end — and even then, prefer porting `test/layout-test.ts`.
 - [x] Step 11 — `LayeredEngine: LayoutEngine` (`layered/engine.rs`, 7 tests). GraphInput.node_sizes → DagreGraph (string ids, edge idx as multigraph name) → layout() → LayoutOutput{positions, edge_routes from edge points[] in input order, size}. Re-exported `hiker_graph::LayeredEngine`. All three engines (Force/Tree/Layered) now share the crate-root `LayoutEngine` trait.
 
 **✅ DAGRE PORT COMPLETE — all 11 steps done. 411 tests green in `cargo test -p hiker-graph`** (every module ported from dagre's own test files as the conformance oracle; no JS ever executed). Full pure-Rust Sugiyama layout incl. subgraphs/clusters, network-simplex ranking, Brandes–Köpf coordinates, edge routing. Public API: `hiker_graph::LayeredEngine` (impl `LayoutEngine`) for the mermaid renderer; `hiker_graph::layered::layout::layout` for direct DagreGraph use. egui-free, std-only, deterministic. Math tests live separately in the hiker-render crate (no collision).
+
+## End-to-end conformance vs dagre.js (`tools/dagre-compare`)
+Unit-level conformance (ported tests) did NOT catch one end-to-end divergence: the
+`order` driver (`order/mod.rs`) overwrote `best` on equal-crossing *ties*, whereas
+dagre keeps the EARLIER ordering. Alternating down/up + left/right-bias sweeps
+produce equal-crossing **mirror-image** layouts, so diagrams came out flipped
+left↔right vs dagre (visible on the CUSTOMER/ORDER ER diagram). **Fixed** (412
+tests green) + regression test `engine::tests::order_matches_dagre_on_ties_no_mirror`.
+Validated against real `@dagrejs/dagre` 1.1.4 via the `tools/dagre-compare` harness
+(host repo): `chain`/`diamond`/`crossing`/`lr-flow`/`er-orders` match to 0.00px.
+- **OPEN:** the `clusters` fixture still diverges — dagre spaces ranks
+  inside/around subgraphs ~2× further apart (x-position/order/cluster-width match;
+  graph height does not). Likely the border-segment/nesting intermediate ranks
+  collapsing. Doesn't affect non-subgraph diagrams.
