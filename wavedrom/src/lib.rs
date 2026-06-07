@@ -42,16 +42,22 @@ impl Default for WaveDromOptions {
             font_family: "Liberation Sans".to_string(),
             foreground: [0, 0, 0, 255],
             background: [255, 255, 255, 255],
-            // WaveDrom data colors 2..9 (yellow/orange/.. pastels).
+            // WaveDrom data-bus colors for wave codes 2..9, mirroring the
+            // default skin classes s7..s14 in references/wavedrom/skins/default.js
+            // (verified against wavedrom.js): code 2 is WHITE, not yellow.
+            //   s7  code 2 #ffffff   s11 code 6 #ccfdfe
+            //   s8  code 3 #ffffb4   s12 code 7 #cdfdc5
+            //   s9  code 4 #ffe0b9   s13 code 8 #f0c1fb
+            //   s10 code 5 #b9e0ff   s14 code 9 #f5c2c0
             series_palette: vec![
-                [255, 255, 180, 255],
-                [255, 224, 185, 255],
-                [185, 224, 255, 255],
-                [185, 255, 185, 255],
-                [225, 200, 255, 255],
-                [255, 200, 225, 255],
-                [200, 255, 240, 255],
-                [230, 230, 230, 255],
+                [0xff, 0xff, 0xff, 255], // s7  code 2
+                [0xff, 0xff, 0xb4, 255], // s8  code 3
+                [0xff, 0xe0, 0xb9, 255], // s9  code 4
+                [0xb9, 0xe0, 0xff, 255], // s10 code 5
+                [0xcc, 0xfd, 0xfe, 255], // s11 code 6
+                [0xcd, 0xfd, 0xc5, 255], // s12 code 7
+                [0xf0, 0xc1, 0xfb, 255], // s13 code 8
+                [0xf5, 0xc2, 0xc0, 255], // s14 code 9
             ],
         }
     }

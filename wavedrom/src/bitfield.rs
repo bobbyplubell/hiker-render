@@ -173,32 +173,24 @@ fn parse_fields(reg: &Value) -> Vec<Field> {
     out
 }
 
-/// WaveDrom's `type → color` table (lib/render.js `colors`). Returns straight
-/// RGBA; falls back to the palette if a host palette is preferred.
-fn type_color(ftype: i64, opts: &WaveDromOptions) -> Option<[u8; 4]> {
-    // Match render.js intent: map the small fixed set, but prefer the host
-    // palette so the diagram tracks the app theme. type N → palette[(N-2)%len]
-    // (WaveDrom's first colored type is 2).
-    if ftype < 2 {
-        // type 0/1 are uncolored in WaveDrom's table.
-        return None;
-    }
-    let pal = &opts.series_palette;
-    if pal.is_empty() {
-        // Fallback to render.js's literal colors.
-        let c = match ftype {
-            2 => [0xff, 0x00, 0x00, 0xff],
-            3 => [0xaa, 0xff, 0x00, 0xff],
-            4 => [0x00, 0xff, 0xd5, 0xff],
-            5 => [0xff, 0xbf, 0x00, 0xff],
-            6 => [0x00, 0xff, 0x19, 0xff],
-            7 => [0x00, 0x6a, 0xff, 0xff],
-            _ => return None,
-        };
-        return Some(c);
-    }
-    let idx = ((ftype - 2).rem_euclid(pal.len() as i64)) as usize;
-    Some(pal[idx])
+/// WaveDrom's bitfield `type → color` table — the literal `colors` map in
+/// `bit-field/lib/render.js` (the renderer wavedrom-cli uses for `reg:`),
+/// verified against wavedrom.js. This is a SEPARATE categorical palette from
+/// the timing data-bus palette (`opts.series_palette`): wavedrom's bitfield
+/// fields use saturated primaries (drawn at low `fill-opacity`), not the
+/// pastel bus skin, so we mirror the literal table rather than the host
+/// series palette. type 0/1 are uncolored; 2..7 map fixed, others uncolored.
+fn type_color(ftype: i64, _opts: &WaveDromOptions) -> Option<[u8; 4]> {
+    let c = match ftype {
+        2 => [0xff, 0x00, 0x00, 0xff], // hsl(0,100%,50%)
+        3 => [0xaa, 0xff, 0x00, 0xff], // hsl(80,100%,50%)
+        4 => [0x00, 0xff, 0xd5, 0xff], // hsl(170,100%,50%)
+        5 => [0xff, 0xbf, 0x00, 0xff], // hsl(45,100%,50%)
+        6 => [0x00, 0xff, 0x19, 0xff], // hsl(126,100%,50%)
+        7 => [0x00, 0x6a, 0xff, 0xff], // hsl(215,100%,50%)
+        _ => return None,
+    };
+    Some(c)
 }
 
 pub fn render(
@@ -467,8 +459,10 @@ fn draw_lane(
         } else if let Some(c) = fill {
             let _ = write!(
                 svg,
+                // render.js draws typed-field rects at `fill-opacity:0.1`
+                // (a faint tint over the white field) — match that exactly.
                 "<rect x=\"{x:.2}\" y=\"0\" width=\"{w:.2}\" height=\"{h:.2}\" \
-                 fill=\"{c}\" fill-opacity=\"0.4\"/>",
+                 fill=\"{c}\" fill-opacity=\"0.1\"/>",
                 h = height,
                 c = rgb(c),
             );

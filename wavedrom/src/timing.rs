@@ -951,8 +951,37 @@ mod tests {
         for lbl in ["a", "b", "c"] {
             assert!(r.svg.contains(&format!(">{lbl}<")), "missing data label {lbl}");
         }
-        // Palette color 3 → second palette entry (255,224,185).
-        assert!(r.svg.contains("rgb(255,224,185)"), "expected a data fill color");
+        // Wave codes 3,4,5 → wavedrom skin s8,s9,s10:
+        //   code 3 = #ffffb4 (255,255,180), code 4 = #ffe0b9 (255,224,185),
+        //   code 5 = #b9e0ff (185,224,255).
+        assert!(r.svg.contains("rgb(255,255,180)"), "code 3 fill = #ffffb4");
+        assert!(r.svg.contains("rgb(255,224,185)"), "code 4 fill = #ffe0b9");
+        assert!(r.svg.contains("rgb(185,224,255)"), "code 5 fill = #b9e0ff");
+    }
+
+    /// Pin the full data-bus palette to wavedrom.js's default-skin classes
+    /// s7..s14 (verified against the reference SVG). Code 2 is WHITE, then the
+    /// pastels run yellow → orange → blue → cyan → green → purple → pink.
+    #[test]
+    fn bus_palette_matches_wavedrom_skin_s7_s14() {
+        // (wave code, expected SVG fill) for codes 2..9. Each code N draws a
+        // data box in a single-cell `xNx` lane.
+        let expected = [
+            (2, "rgb(255,255,255)"), // s7  #ffffff
+            (3, "rgb(255,255,180)"), // s8  #ffffb4
+            (4, "rgb(255,224,185)"), // s9  #ffe0b9
+            (5, "rgb(185,224,255)"), // s10 #b9e0ff
+            (6, "rgb(204,253,254)"), // s11 #ccfdfe
+            (7, "rgb(205,253,197)"), // s12 #cdfdc5
+            (8, "rgb(240,193,251)"), // s13 #f0c1fb
+            (9, "rgb(245,194,192)"), // s14 #f5c2c0
+        ];
+        for (code, fill) in expected {
+            let src = format!(r#"{{signal:[{{name:"b",wave:"x{code}x"}}]}}"#);
+            let v = parse(&src);
+            let r = render(&v, &WaveDromOptions::default()).expect("ok");
+            assert!(r.svg.contains(fill), "code {code} should fill {fill}");
+        }
     }
 
     #[test]
