@@ -1,10 +1,10 @@
-# Umbrella workspace. The render crates live under `hiker-render/`:
-#   hiker-render/htmlview  — HTML/CSS renderer (Stylo + our layout/CSS/paint + egui)
-#   hiker-render/math      — egui-agnostic LaTeX math engine (→ SVG)
-#   hiker-render/graph     — egui-agnostic graph layout (tree/force + dagre port)
-#   hiker-render/mermaid   — pure-Rust mermaid diagrams (→ SVG), layout via hiker-graph
-# The `hiker-render` root package is a legacy LaTeX-math copy being consolidated
-# into `hiker-render/math` (hiker-math); nothing depends on it.
+# Workspace of reusable, egui-agnostic renderers (each crate at the root):
+#   htmlview  — HTML/CSS renderer (Stylo + our layout/CSS/paint + egui)
+#   math      — egui-agnostic LaTeX math engine (→ SVG)
+#   graph     — egui-agnostic graph layout (tree/force + dagre port)
+#   mermaid   — pure-Rust mermaid diagrams (→ SVG), layout via hiker-graph
+#   wavedrom  — pure-Rust WaveDrom timing diagrams (→ SVG)
+#   chart     — pure-Rust charts (→ SVG)
 [workspace]
-members = ["hiker-render", "hiker-render/htmlview", "hiker-render/graph", "hiker-render/math", "hiker-render/mermaid", "hiker-render/wavedrom", "hiker-render/chart"]
+members = ["htmlview", "graph", "math", "mermaid", "wavedrom", "chart"]
 resolver = "2"

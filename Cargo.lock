@@ -2121,15 +2121,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hiker-render"
-version = "0.1.0"
-dependencies = [
- "pulldown-latex",
- "resvg",
- "ttf-parser 0.25.1",
-]
-
-[[package]]
 name = "hiker-wavedrom"
 version = "0.1.0"
 dependencies = [
