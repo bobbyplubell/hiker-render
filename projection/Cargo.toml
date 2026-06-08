@@ -1,0 +1,20 @@
+[package]
+name = "hiker-projection"
+version = "0.1.0"
+edition = "2024"
+description = "Egui-free math kernel for hyperbolic/fisheye projection — complex/Möbius/geodesic primitives and the Affine/Fisheye/Poincaré lens seam. std-only, no graphics deps."
+
+[dependencies]
+
+# Examples only. The core crate (`src/`) stays zero-dependency; these are used
+# solely by `examples/` to rasterize/visually verify the kernel.
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+eframe = { version = "0.32", features = ["glow", "wgpu"] }
+egui = "0.32"
+
+[[example]]
+name = "snapshot"
+
+[[example]]
+name = "demo"

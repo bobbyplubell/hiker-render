@@ -15,6 +15,7 @@
 //! - [`layout`] — chart + sizes → [`model::PositionedDiagram`] (uses `hiker_graph`).
 //! - [`draw`] — positioned diagram → SVG document.
 
+pub mod diagram;
 pub mod draw;
 pub mod layout;
 pub mod measure;
@@ -58,6 +59,7 @@ pub mod treemap;
 pub mod venn;
 pub mod xychart;
 
+pub use diagram::Mermaid;
 pub use model::*;
 pub use theme::MermaidTheme;
 
@@ -399,6 +401,32 @@ fn inject_background(rendered: &mut MermaidRender, bg: [u8; 4]) {
         b = bg[2],
     );
     rendered.svg.insert_str(gt + 1, &rect);
+}
+
+/// Parse-only syntax check for mermaid source.
+///
+/// `Ok(())` means the source parses; `Err(MermaidError::Parse)` carries a syntax
+/// error. An empty-but-valid diagram ([`MermaidError::Empty`]) is *not* a syntax
+/// error, so it maps to `Ok(())`.
+///
+/// Flowcharts (`graph`/`flowchart`) run the dedicated [`parse::parse_flowchart`]
+/// parser only (no layout/draw). Every other diagram type goes through its
+/// renderer (their parsers aren't separately public), which still surfaces the
+/// same `Parse` errors; the layout/draw work is the cost of a v0 uniform seam.
+pub fn check(src: &str) -> Result<(), MermaidError> {
+    let base = MermaidOptions::default();
+    let (clean, owned) = preprocess_opts(src, &base);
+    let opts: &MermaidOptions = owned.as_ref().unwrap_or(&base);
+    match diagram_keyword(&clean).as_deref() {
+        Some("graph") | Some("flowchart") => {
+            parse::parse_flowchart(&clean).map_err(MermaidError::Parse)?;
+            Ok(())
+        }
+        _ => match dispatch(&clean, opts) {
+            Ok(_) | Err(MermaidError::Empty) => Ok(()),
+            Err(e) => Err(e),
+        },
+    }
 }
 
 /// Dispatch a (already-preprocessed) source to its diagram renderer by header.

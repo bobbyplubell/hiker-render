@@ -19,7 +19,12 @@
 //! implementations studied (read-only, never linked): `references/microtex`
 //! (C++), `references/katex` (JS).
 
+pub mod diagram;
 pub mod font;
 pub mod math;
 
-pub use math::{render_latex, render_latex_with_preamble, MathOptions, MathRender, MathStyle};
+pub use diagram::Math;
+pub use math::{
+    check_latex, render_latex, render_latex_with_preamble, MathError, MathOptions, MathRender,
+    MathStyle,
+};

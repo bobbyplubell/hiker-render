@@ -5,6 +5,8 @@
 #   mermaid   — pure-Rust mermaid diagrams (→ SVG), layout via hiker-graph
 #   wavedrom  — pure-Rust WaveDrom timing diagrams (→ SVG)
 #   chart     — pure-Rust charts (→ SVG)
+#   projection — egui-free hyperbolic/fisheye projection math kernel
+#   diagram   — shared render→SVG / syntax-check trait across mermaid/wavedrom/math
 [workspace]
-members = ["htmlview", "graph", "math", "mermaid", "wavedrom", "chart"]
+members = ["htmlview", "graph", "math", "mermaid", "wavedrom", "chart", "projection", "diagram"]
 resolver = "2"

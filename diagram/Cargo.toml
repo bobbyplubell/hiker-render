@@ -1,0 +1,7 @@
+[package]
+name = "hiker-diagram"
+version = "0.1.0"
+edition = "2024"
+description = "Shared diagram-renderer trait and types: a common render→SVG / syntax-check seam for mermaid / WaveDrom / math. egui-agnostic, no graphics deps."
+
+[dependencies]

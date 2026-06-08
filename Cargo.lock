@@ -2071,8 +2071,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hiker-diagram"
+version = "0.1.0"
+
+[[package]]
 name = "hiker-graph"
 version = "0.1.0"
+dependencies = [
+ "image",
+]
 
 [[package]]
 name = "hiker-htmlview"
@@ -2103,6 +2110,7 @@ dependencies = [
 name = "hiker-math"
 version = "0.1.0"
 dependencies = [
+ "hiker-diagram",
  "pulldown-latex",
  "resvg",
  "ttf-parser 0.25.1",
@@ -2114,10 +2122,20 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "hiker-diagram",
  "hiker-graph",
  "hiker-math",
  "resvg",
  "ttf-parser 0.25.1",
+]
+
+[[package]]
+name = "hiker-projection"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "image",
 ]
 
 [[package]]
@@ -2126,6 +2144,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "hiker-diagram",
  "json5",
  "resvg",
  "serde_json",

@@ -88,6 +88,20 @@ pub struct LayoutParams {
     /// each other much harder than their satellite leaves repel each
     /// other.
     pub degree_repulsion: bool,
+
+    /// Weak spring constant pulling each *anchored* node toward its
+    /// anchor position (the position it held in the previous layout).
+    /// This is the knob for **temporal layout stability**: when a graph
+    /// is re-solved after nodes are added/removed, retained nodes are
+    /// anchored to where they were, so the layout morphs coherently
+    /// instead of reshuffling. `0.0` = off (no anchoring); the anchor
+    /// force is skipped entirely and the solver behaves exactly as it
+    /// did before anchors existed. Typical useful range is small
+    /// (`~0.01`–`0.2`): big enough to tether retained nodes, small
+    /// enough that newly added nodes can still pull the layout into a
+    /// sensible new shape. Only takes effect when anchors are supplied
+    /// (e.g. via [`force_to_convergence_anchored`]).
+    pub anchor_stiffness: f32,
 }
 
 impl Default for LayoutParams {
@@ -119,6 +133,7 @@ impl Default for LayoutParams {
             lin_log: false,
             outbound_attraction_distribution: false,
             degree_repulsion: true,
+            anchor_stiffness: 0.0,
         }
     }
 }
@@ -133,6 +148,7 @@ fn run_fa2(
     pos: &mut [Vec2],
     edges: &[(u32, u32)],
     params: &LayoutParams,
+    anchors: Option<&[Option<Vec2>]>,
     should_stop: impl Fn() -> bool,
     mut on_iter: impl FnMut(u32, &[Vec2]),
 ) {
@@ -179,6 +195,15 @@ fn run_fa2(
     // for one painful day; that crushed everything toward the
     // origin and produced visible chaos at small zooms.
     let g_eff = params.gravity;
+
+    // Anchoring is active only when a caller supplied an anchor slice and
+    // the spring constant is positive. When inactive, the anchor force is
+    // never touched, so the solver is byte-identical to the un-anchored
+    // path (and `force_to_convergence`/`force_layout`, which pass `None`).
+    let anchored = match anchors {
+        Some(a) => params.anchor_stiffness > 0.0 && a.len() == n,
+        None => false,
+    };
 
     let mut converged_streak = 0u32;
 
@@ -286,6 +311,22 @@ fn run_fa2(
             disp[b] -= d * attr_factor;
         }
 
+        // 3b) Anchor springs (temporal stability). Each anchored node
+        // feels a weak Hooke spring toward the position it held in the
+        // previous layout. Nodes with no anchor (e.g. newly added) feel
+        // nothing here and settle freely under the other forces. The
+        // spring participates in the normal adaptive-speed apply step
+        // below like any other accumulated force.
+        if anchored {
+            let anchors = anchors.expect("anchored implies Some(anchors)");
+            let k = params.anchor_stiffness;
+            for i in 0..n {
+                if let Some(a) = anchors[i] {
+                    disp[i] += (a - pos[i]) * k;
+                }
+            }
+        }
+
         // 4) Apply forces with FA2 adaptive node speed.
         // This is the load-bearing piece for convergence
         // — see module docs.
@@ -347,7 +388,7 @@ pub fn force_to_convergence(
     should_stop: impl Fn() -> bool,
 ) -> Vec<Vec2> {
     let mut pos = initial;
-    run_fa2(&mut pos, edges, params, should_stop, |_, _| {});
+    run_fa2(&mut pos, edges, params, None, should_stop, |_, _| {});
     pos
 }
 
@@ -355,6 +396,28 @@ pub fn force_to_convergence(
 /// that never fires.
 pub fn force_layout(initial: Vec<Vec2>, edges: &[(u32, u32)], params: &LayoutParams) -> Vec<Vec2> {
     force_to_convergence(initial, edges, params, || false)
+}
+
+/// Like [`force_to_convergence`], but with **anchor springs** for
+/// temporal layout stability. `anchors[i] == Some(p)` tethers node `i`
+/// to position `p` (where it sat in the previous layout) via a weak
+/// spring of strength `params.anchor_stiffness`; `anchors[i] == None`
+/// (e.g. a newly added node) lets the node settle freely. `anchors`
+/// must be the same length as `initial`.
+///
+/// With `params.anchor_stiffness == 0.0` (or an `anchors` slice of the
+/// wrong length) the anchor force is skipped and this is identical to
+/// [`force_to_convergence`]. Drives the same [`run_fa2`] physics.
+pub fn force_to_convergence_anchored(
+    initial: Vec<Vec2>,
+    edges: &[(u32, u32)],
+    params: &LayoutParams,
+    anchors: &[Option<Vec2>],
+    should_stop: impl Fn() -> bool,
+) -> Vec<Vec2> {
+    let mut pos = initial;
+    run_fa2(&mut pos, edges, params, Some(anchors), should_stop, |_, _| {});
+    pos
 }
 
 /// Background-thread driver for the FA2 layout. **Native only** — gated
@@ -380,7 +443,31 @@ mod worker {
     }
 
     impl LayoutWorker {
+        /// Spawn the background FA2 solver with no anchoring.
         pub fn spawn(initial: Vec<Vec2>, edges: Vec<(u32, u32)>, params: LayoutParams) -> Self {
+            Self::spawn_with_optional_anchors(initial, edges, params, None)
+        }
+
+        /// Spawn the background FA2 solver with **anchor springs** for
+        /// temporal stability (see [`super::force_to_convergence_anchored`]).
+        /// `anchors[i] == Some(p)` tethers node `i` to `p`; `None` lets it
+        /// settle freely. `anchors` should match `initial` in length and is
+        /// honoured only when `params.anchor_stiffness > 0.0`.
+        pub fn spawn_anchored(
+            initial: Vec<Vec2>,
+            edges: Vec<(u32, u32)>,
+            params: LayoutParams,
+            anchors: Vec<Option<Vec2>>,
+        ) -> Self {
+            Self::spawn_with_optional_anchors(initial, edges, params, Some(anchors))
+        }
+
+        fn spawn_with_optional_anchors(
+            initial: Vec<Vec2>,
+            edges: Vec<(u32, u32)>,
+            params: LayoutParams,
+            anchors: Option<Vec<Option<Vec2>>>,
+        ) -> Self {
             let positions = Arc::new(RwLock::new(initial.clone()));
             let iter_count = Arc::new(AtomicU32::new(0));
             let done = Arc::new(AtomicBool::new(false));
@@ -406,6 +493,7 @@ mod worker {
                         &mut pos,
                         &edges,
                         &params,
+                        anchors.as_deref(),
                         || stop_arc.load(Ordering::Relaxed),
                         |iter, pos| {
                             if let Ok(mut w) = pos_arc.write() {
@@ -661,5 +749,281 @@ mod tests {
         // Stopping immediately yields the seed unchanged.
         let out = force_to_convergence(seed.clone(), &edges, &params, || true);
         assert_eq!(out, seed);
+    }
+
+    fn mean_displacement(a: &[Vec2], b: &[Vec2]) -> f32 {
+        assert_eq!(a.len(), b.len());
+        if a.is_empty() {
+            return 0.0;
+        }
+        let total: f32 = a
+            .iter()
+            .zip(b)
+            .map(|(p, q)| (*p - *q).length())
+            .sum();
+        total / a.len() as f32
+    }
+
+    /// `anchor_stiffness = 0` (anchors all `None`) must be byte-identical
+    /// to the plain un-anchored solve on the same seed/edges/params.
+    #[test]
+    fn anchored_with_zero_stiffness_matches_plain() {
+        let n = 6;
+        let edges = ring(n as u32);
+        let params = LayoutParams::default();
+        assert_eq!(params.anchor_stiffness, 0.0);
+
+        let plain = force_to_convergence(circle_seed(n), &edges, &params, || false);
+
+        // Even with real anchor positions, stiffness 0 disables the force.
+        let anchors: Vec<Option<Vec2>> = circle_seed(n).into_iter().map(Some).collect();
+        let anchored =
+            force_to_convergence_anchored(circle_seed(n), &edges, &params, &anchors, || false);
+
+        assert_eq!(plain, anchored);
+    }
+
+    /// A `Some`-everywhere anchors slice with positive stiffness still
+    /// equals the un-anchored solve when stiffness is 0 — and crucially,
+    /// passing `None` for every node also matches plain regardless of
+    /// stiffness (no anchored node = no anchor force).
+    #[test]
+    fn all_none_anchors_match_plain_even_with_stiffness() {
+        let n = 6;
+        let edges = ring(n as u32);
+        let params = LayoutParams {
+            anchor_stiffness: 0.1,
+            ..LayoutParams::default()
+        };
+        let plain = force_to_convergence(circle_seed(n), &edges, &params, || false);
+        let anchors: Vec<Option<Vec2>> = vec![None; n];
+        let anchored =
+            force_to_convergence_anchored(circle_seed(n), &edges, &params, &anchors, || false);
+        assert_eq!(plain, anchored);
+    }
+
+    // ── Tangle regression: anchored re-solve of a COMPLEX graph ──────────
+    //
+    // These mirror the live warm-start path (warm seed + adaptive anchor
+    // stiffness scaled by structural change) and assert via the tangle
+    // metric that a big re-clustering's anchored re-solve is no more tangled
+    // than a fresh solve, while a small change stays coherent.
+
+    use crate::tangle::edge_crossings;
+
+    /// A deterministic clustered graph: `clusters` rings of `per` nodes plus
+    /// inter-cluster bridges whose pattern depends on `variant`, so two
+    /// variants are substantially different wirings of (almost) the same node
+    /// set. `variant != 0` also adds one fresh node (an add/remove dimension).
+    fn complex_graph(clusters: usize, per: usize, variant: u32) -> (usize, Vec<(u32, u32)>) {
+        let n = clusters * per + if variant == 0 { 0 } else { 1 };
+        let mut edges: Vec<(u32, u32)> = Vec::new();
+        let peru = per as u32;
+        for c in 0..clusters {
+            let base = (c * per) as u32;
+            for k in 0..peru {
+                edges.push((base + k, base + (k + 1) % peru));
+            }
+            edges.push((base, base + peru / 2));
+            edges.push((base + 1, base + peru / 2 + 1));
+        }
+        for c in 0..clusters {
+            let a = (c * per) as u32;
+            let next = ((c + 1) % clusters * per) as u32;
+            let off = (variant * 3 + c as u32) % peru;
+            edges.push((a + off, next + (off + variant) % peru));
+            let across = ((c + clusters / 2) % clusters * per) as u32;
+            edges.push((a + (variant + 1) % peru, across));
+        }
+        if variant != 0 {
+            let extra = (clusters * per) as u32;
+            edges.push((extra, 0));
+            edges.push((extra, peru * 3 + 2));
+        }
+        (n, edges)
+    }
+
+    /// Deterministic per-index scatter (matches the graph-view seed family) so
+    /// the "fresh" baseline uses the same seed distribution the live fresh
+    /// path uses — force layout is seed-sensitive, so the comparison must hold
+    /// the seed family fixed to measure tangle rather than basin luck.
+    fn scatter_seed(n: usize, box_size: f32) -> Vec<Vec2> {
+        (0..n)
+            .map(|i| {
+                let mut s =
+                    0x9E37_79B9_7F4A_7C15u64 ^ (i as u64).wrapping_mul(0x2545_F491_4F6C_DD1D);
+                let mut rng = || {
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((s >> 33) as u32) as f32 / (u32::MAX as f32)
+                };
+                Vec2::new((rng() - 0.5) * box_size, (rng() - 0.5) * box_size)
+            })
+            .collect()
+    }
+
+    /// Adaptive anchor stiffness, mirroring `graph_view::adaptive_anchor_stiffness`:
+    /// linear from `baseline` at 0% changed to 0 at ≥50% changed.
+    fn adaptive_stiffness(baseline: f32, change_fraction: f32) -> f32 {
+        let factor = (1.0 - change_fraction / 0.5).clamp(0.0, 1.0);
+        baseline * factor
+    }
+
+    /// The regression guard. Build a complex graph G1, solve fresh (P1). Build
+    /// a substantially restructured G2 and solve it (a) FRESH and (b) WARM +
+    /// ANCHORED with the ADAPTIVE policy (stiffness + warm-seed relax scaled by
+    /// change). The adaptive anchored re-solve must be no more tangled than the
+    /// fresh solve (within a sane bound) — where the OLD flat-stiffness
+    /// behaviour was dramatically worse.
+    #[test]
+    fn adaptive_anchor_untangles_big_change() {
+        let params = LayoutParams::default();
+        let (n1, e1) = complex_graph(8, 12, 0);
+        let p1 = force_to_convergence(scatter_seed(n1, 400.0), &e1, &params, || false);
+
+        let (n2, e2) = complex_graph(8, 12, 1);
+        let retained = n1.min(n2);
+
+        // Fresh baseline from the same seed family.
+        let fresh = force_to_convergence(scatter_seed(n2, 400.0), &e2, &params, || false);
+        let c_fresh = edge_crossings(&fresh, &e2);
+
+        // change_fraction ~ 0.45 here (big rewrite) → near-zero stiffness +
+        // near-full seed relax.
+        let change_fraction = 0.45;
+        let relax = (change_fraction / 0.5_f32).clamp(0.0, 1.0);
+        let stiffness = adaptive_stiffness(0.2, change_fraction);
+
+        // Warm seed: retained nodes blended from P1 toward the fresh-scatter
+        // by `relax`; the lone new node spawns near the centroid. Anchors are
+        // the true P1 positions for retained nodes (strength is what scales).
+        let centroid = {
+            let s: Vec2 = p1.iter().fold(Vec2::ZERO, |a, p| a + *p);
+            s / p1.len() as f32
+        };
+        let scatter = scatter_seed(n2, 400.0);
+        let mut warm = Vec::with_capacity(n2);
+        let mut anchors: Vec<Option<Vec2>> = Vec::with_capacity(n2);
+        for i in 0..n2 {
+            if i < retained {
+                let p = p1[i];
+                warm.push(p + (scatter[i] - p) * relax);
+                anchors.push(Some(p));
+            } else {
+                warm.push(centroid);
+                anchors.push(None);
+            }
+        }
+        let anchor_params = LayoutParams {
+            anchor_stiffness: stiffness,
+            ..LayoutParams::default()
+        };
+        let anchored = force_to_convergence_anchored(warm, &e2, &anchor_params, &anchors, || false);
+        let c_anchored = edge_crossings(&anchored, &e2);
+
+        // And the OLD flat-stiffness behaviour for contrast (warm seed pinned
+        // to P1, full stiffness) — documents the regression this guards.
+        let mut warm_old = Vec::with_capacity(n2);
+        for i in 0..n2 {
+            warm_old.push(if i < retained { p1[i] } else { centroid });
+        }
+        let old_params = LayoutParams {
+            anchor_stiffness: 0.2,
+            ..LayoutParams::default()
+        };
+        let anchored_old =
+            force_to_convergence_anchored(warm_old, &e2, &old_params, &anchors, || false);
+        let c_old = edge_crossings(&anchored_old, &e2);
+
+        assert!(
+            c_anchored as f32 <= c_fresh as f32 * 1.3,
+            "adaptive anchored re-solve too tangled: {c_anchored} crossings vs fresh {c_fresh} \
+             (bound {:.0}); old flat behaviour was {c_old}",
+            c_fresh as f32 * 1.3
+        );
+        // Sanity: the old behaviour really is the regression we fixed (else
+        // this test isn't testing anything).
+        assert!(
+            c_old > c_fresh,
+            "expected old flat-stiffness behaviour to be more tangled than fresh \
+             (old {c_old}, fresh {c_fresh})"
+        );
+    }
+
+    /// Temporal-stability guarantee: re-solving a grown graph with anchors
+    /// keeps the retained nodes near their old positions, where a fresh
+    /// solve reshuffles them.
+    #[test]
+    fn anchored_resolve_preserves_retained_layout() {
+        // Base graph: a 6-ring. Solve it to get P1.
+        let base_n = 6usize;
+        let base_edges = ring(base_n as u32);
+        let params = LayoutParams::default();
+        let p1 = force_to_convergence(circle_seed(base_n), &base_edges, &params, || false);
+
+        // Grow it: add a 4-node cluster attached to base node 0.
+        let new_ids = [6u32, 7, 8, 9];
+        let mut edges = base_edges.clone();
+        // ring among the new nodes + one bridge into the base graph.
+        for w in 0..new_ids.len() {
+            edges.push((new_ids[w], new_ids[(w + 1) % new_ids.len()]));
+        }
+        edges.push((0, new_ids[0]));
+        let total_n = base_n + new_ids.len();
+
+        // (a) FRESH solve from a scatter seed (deterministic).
+        let scatter: Vec<Vec2> = (0..total_n)
+            .map(|i| {
+                let a = i as f32 / total_n as f32 * std::f32::consts::TAU;
+                // offset the angle so it doesn't accidentally match P1
+                Vec2::new((a + 0.7).cos() * 120.0, (a + 0.7).sin() * 120.0)
+            })
+            .collect();
+        let fresh = force_to_convergence(scatter, &edges, &params, || false);
+
+        // (b) WARM + ANCHORED: retained nodes start at (and are anchored
+        // to) their P1 positions; new nodes spawn near the centroid.
+        let centroid = {
+            let s: Vec2 = p1.iter().fold(Vec2::ZERO, |acc, p| acc + *p);
+            s / p1.len() as f32
+        };
+        let mut warm_seed = p1.clone();
+        let mut anchors: Vec<Option<Vec2>> = p1.iter().map(|p| Some(*p)).collect();
+        for (k, _) in new_ids.iter().enumerate() {
+            // small deterministic spread around the centroid
+            let off = Vec2::new((k as f32 * 1.3).cos() * 5.0, (k as f32 * 1.3).sin() * 5.0);
+            warm_seed.push(centroid + off);
+            anchors.push(None);
+        }
+        let anchor_params = LayoutParams {
+            anchor_stiffness: 0.1,
+            ..LayoutParams::default()
+        };
+        let warm =
+            force_to_convergence_anchored(warm_seed, &edges, &anchor_params, &anchors, || false);
+
+        // Compare retained nodes (0..base_n) against P1.
+        let fresh_drift = mean_displacement(&fresh[..base_n], &p1);
+        let warm_drift = mean_displacement(&warm[..base_n], &p1);
+
+        // The anchored re-solve must keep retained nodes substantially
+        // closer to their original positions than the fresh solve.
+        assert!(
+            warm_drift < fresh_drift * 0.5,
+            "anchored drift {warm_drift} should be << fresh drift {fresh_drift}"
+        );
+
+        // And a new node must actually move toward its neighbours, not be
+        // stuck at its spawn point near the centroid.
+        let spawn0 = centroid + Vec2::new(0.0_f32.cos() * 5.0, 0.0_f32.sin() * 5.0);
+        let settled0 = warm[base_n];
+        let moved = (settled0 - spawn0).length();
+        assert!(
+            moved > 5.0,
+            "new node should settle away from its spawn ({moved} world units moved)"
+        );
+        // It should be finite and within bounds.
+        assert!(settled0.x.is_finite() && settled0.y.is_finite());
     }
 }

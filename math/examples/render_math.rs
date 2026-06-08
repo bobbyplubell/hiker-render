@@ -19,9 +19,12 @@ fn main() {
         color: [0, 0, 0, 255],
         style: hiker_math::MathStyle::Display,
     };
-    let Some(r) = hiker_math::render_latex(&src, &opts) else {
-        println!("render_latex returned None for: {src}");
-        return;
+    let r = match hiker_math::render_latex(&src, &opts) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("render_latex failed ({e:?}) for: {src}");
+            return;
+        }
     };
 
     // Write under the workspace `target/` (run cargo from the workspace root).

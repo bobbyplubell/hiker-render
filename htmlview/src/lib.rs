@@ -302,7 +302,7 @@ impl HtmlView {
                     hiker_math::MathStyle::Inline
                 },
             };
-            let Some(r) = hiker_math::render_latex(&latex, &opts) else {
+            let Ok(r) = hiker_math::render_latex(&latex, &opts) else {
                 continue;
             };
             out.insert(id, r.svg);
@@ -655,7 +655,7 @@ fn render_math_alt(
             hiker_math::MathStyle::Inline
         },
     };
-    let render = hiker_math::render_latex(alt, &opts)?;
+    let render = hiker_math::render_latex(alt, &opts).ok()?;
     render_svg(render.svg.as_bytes(), target, ppp)
 }
 

@@ -711,7 +711,7 @@
         };
         let out =
             super::super::render_latex(r"\sum_{\substack{0<i<n \\ i\ne k}} a_i", &opts);
-        assert!(out.is_some(), "sum over substack renders Some");
+        assert!(out.is_ok(), "sum over substack renders Ok");
     }
 
     /// `\substack{…}` renders one style step *smaller* than a plain `matrix`: the

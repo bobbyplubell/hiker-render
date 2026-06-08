@@ -313,6 +313,7 @@ fn math_render(latex: &str, font_size: f32, color: [u8; 4]) -> Option<hiker_math
         latex,
         &MathOptions { font_size_px: font_size, color, style: MathStyle::Inline },
     )
+    .ok()
 }
 
 /// Width of a single run at `font_size`. Math width falls back to the raw

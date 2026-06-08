@@ -168,10 +168,10 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("golden")
 }
 
-/// Render a case to SVG, or panic with a clear message if it returns `None`.
+/// Render a case to SVG, or panic with a clear message on a render error.
 fn render_case(name: &str, style: Style, latex: &str) -> String {
     render_latex(latex, &style.options())
-        .unwrap_or_else(|| panic!("case `{name}` rendered None for input: {latex}"))
+        .unwrap_or_else(|e| panic!("case `{name}` failed ({e:?}) for input: {latex}"))
         .svg
 }
 

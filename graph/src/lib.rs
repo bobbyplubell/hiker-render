@@ -24,11 +24,15 @@
 
 pub mod force;
 pub mod layered;
+pub mod tangle;
 pub mod tree;
 pub mod vec2;
 
-pub use force::{force_layout, force_to_convergence, LayoutParams};
-pub use layered::LayeredEngine;
+pub use force::{
+    force_layout, force_to_convergence, force_to_convergence_anchored, LayoutParams,
+};
+pub use tangle::{edge_crossings, total_edge_length};
+pub use layered::{LayeredEngine, RankDir};
 #[cfg(not(target_arch = "wasm32"))]
 pub use force::LayoutWorker;
 pub use tree::{
@@ -163,9 +167,10 @@ impl LayoutEngine for TreeEngine {
         let positions = match self.kind {
             LayoutKind::Radial => radial_positions(&tree, self.area),
             LayoutKind::HorizontalTree => horizontal_tree_positions(&tree, self.area),
-            // ForceDirected has no tree placement of its own; fall back
-            // to the vertical tidy tree.
-            LayoutKind::VerticalTree | LayoutKind::ForceDirected => {
+            // ForceDirected and Layered have no tree placement of their own;
+            // fall back to the vertical tidy tree (callers that want the real
+            // layered layout use `LayeredEngine` directly).
+            LayoutKind::VerticalTree | LayoutKind::ForceDirected | LayoutKind::Layered => {
                 vertical_tree_positions(&tree, self.area)
             }
         };

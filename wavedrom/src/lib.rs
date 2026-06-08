@@ -15,9 +15,12 @@
 
 pub mod assign;
 pub mod bitfield;
+pub mod diagram;
 pub mod font;
 pub mod svgutil;
 pub mod timing;
+
+pub use diagram::WaveDrom;
 
 /// Rendering inputs (sizes, colors, fonts). Defaults approximate WaveDrom's
 /// default skin.
@@ -74,12 +77,60 @@ pub struct WaveDromRender {
 /// Errors from [`render`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WaveDromError {
-    /// The source could not be parsed as WaveJSON (JSON5 syntax error).
-    Parse(String),
+    /// The source could not be parsed as WaveJSON (JSON5 syntax error). The
+    /// optional byte range locates the error in `src` when json5 reported a
+    /// position.
+    Parse(String, Option<core::ops::Range<usize>>),
     /// Parsed OK but there was nothing to draw (no signals / fields).
     Empty,
     /// A recognized-but-unsupported shape, or an unrecognized top-level form.
     Unsupported(String),
+}
+
+/// Parse WaveJSON (JSON5) to a [`serde_json::Value`], mapping a json5 error to a
+/// [`WaveDromError::Parse`] with a byte span derived from its line/column.
+fn parse_wavejson(src: &str) -> Result<serde_json::Value, WaveDromError> {
+    json5::from_str(src).map_err(|e| {
+        let span = json5_error_span(&e, src);
+        WaveDromError::Parse(e.to_string(), span)
+    })
+}
+
+/// Translate a json5 error's one-based line/column into a single-byte source
+/// range, so a host can point at the failure. `None` when json5 gave no location.
+fn json5_error_span(err: &json5::Error, src: &str) -> Option<core::ops::Range<usize>> {
+    let json5::Error::Message { location, .. } = err;
+    let loc = location.as_ref()?;
+    // Walk to the start of the 1-based `line`, then add `column - 1` bytes.
+    let mut offset = 0usize;
+    for (i, line) in src.split_inclusive('\n').enumerate() {
+        if i + 1 == loc.line {
+            offset += loc.column.saturating_sub(1).min(line.len());
+            let end = (offset + 1).min(src.len());
+            return Some(offset..end.max(offset));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// Route a parsed WaveJSON `val` to its renderer (or produce
+/// [`WaveDromError::Unsupported`] for an unrecognized top-level form). Shared by
+/// [`render`] and [`check`].
+fn route(val: &serde_json::Value, opts: &WaveDromOptions) -> Result<WaveDromRender, WaveDromError> {
+    if val.get("signal").is_some() {
+        timing::render(val, opts)
+    } else if let Some(asg) = val.get("assign") {
+        assign::render(asg, opts)
+    } else if let Some(reg) = val.get("reg") {
+        bitfield::render(reg, val, opts)
+    } else if val.is_array() {
+        bitfield::render(val, val, opts)
+    } else {
+        Err(WaveDromError::Unsupported(
+            "WaveJSON must have a `signal` or `reg` key, or be a bitfield array".to_string(),
+        ))
+    }
 }
 
 /// Render WaveDrom **WaveJSON** source to an SVG document, auto-detecting the
@@ -87,20 +138,18 @@ pub enum WaveDromError {
 /// circuit schematic; `{reg:[…]}` or a bare `[…]` array → bitfield/register
 /// diagram.
 pub fn render(src: &str, opts: &WaveDromOptions) -> Result<WaveDromRender, WaveDromError> {
-    let val: serde_json::Value =
-        json5::from_str(src).map_err(|e| WaveDromError::Parse(e.to_string()))?;
+    let val = parse_wavejson(src)?;
+    route(&val, opts)
+}
 
-    if val.get("signal").is_some() {
-        timing::render(&val, opts)
-    } else if let Some(asg) = val.get("assign") {
-        assign::render(asg, opts)
-    } else if let Some(reg) = val.get("reg") {
-        bitfield::render(reg, &val, opts)
-    } else if val.is_array() {
-        bitfield::render(&val, &val, opts)
-    } else {
-        Err(WaveDromError::Unsupported(
-            "WaveJSON must have a `signal` or `reg` key, or be a bitfield array".to_string(),
-        ))
-    }
+/// Parse-and-route syntax check for WaveJSON source.
+///
+/// `Ok(())` means the source parses as WaveJSON *and* routes to a renderer that
+/// produces output. A JSON5 syntax error → [`WaveDromError::Parse`] (with a byte
+/// span when json5 located it); an empty diagram → [`WaveDromError::Empty`]; an
+/// unrecognized top-level form → [`WaveDromError::Unsupported`]. Mirrors exactly
+/// the validation [`render`] does, sans the SVG emission cost beyond routing.
+pub fn check(src: &str, opts: &WaveDromOptions) -> Result<(), WaveDromError> {
+    let val = parse_wavejson(src)?;
+    route(&val, opts).map(|_| ())
 }

@@ -10,6 +10,9 @@ description = "Reusable, egui-agnostic LaTeX math typesetting — pulldown-latex
 pulldown-latex = "0.7"
 # OpenType MATH-table + glyph outline reader for the bundled math font.
 ttf-parser = "0.25"
+# Shared render→SVG / syntax-check trait across the diagram engines; this crate
+# implements it for math via the `Math` marker type.
+hiker-diagram = { path = "../diagram" }
 
 [dev-dependencies]
 # Eyeball-only: rasterize the SVG output to PNG in examples/tests. Dev-only, so

@@ -355,6 +355,23 @@ pub(crate) fn parse_list(src: &str) -> Option<MathList> {
     Some(list)
 }
 
+/// Run the `pulldown-latex` parser over `src` purely to surface a syntax error.
+///
+/// `Ok(())` means every event parsed; `Err(msg)` carries the parser's own error
+/// string for the first failing event. Used by the render/`check` layer to turn
+/// a parse failure into a [`super::super::MathError::Parse`] with a real message
+/// (the box-layout path itself only needs `parse_list`'s `Option`).
+pub(crate) fn parse_error(src: &str) -> Result<(), String> {
+    use pulldown_latex::{Parser, Storage};
+
+    let storage = Storage::new();
+    let parser = Parser::new(src, &storage);
+    for ev in parser {
+        ev.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Read events into a [`MathList`] starting at `*i`. With `until_end`, consume up
 /// to (and past) the matching [`Event::End`] for a group we've already entered;
 /// otherwise read to the end of the buffer (the top-level row). `font` is the

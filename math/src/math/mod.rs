@@ -52,6 +52,15 @@ impl Default for MathOptions {
     }
 }
 
+/// Errors from [`render_latex`] / [`render_latex_with_preamble`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MathError {
+    /// The (combined) input could not be parsed / laid out.
+    Parse(String),
+    /// `src` was empty or all-whitespace — nothing to render.
+    Empty,
+}
+
 /// A rendered equation: an SVG document plus the metrics a host needs to place
 /// it inline (so it can vertically align the math axis with surrounding text).
 #[derive(Clone, Debug)]
@@ -67,13 +76,13 @@ pub struct MathRender {
     pub baseline_px: f32,
 }
 
-/// Render a LaTeX math string to SVG. Returns `None` if the input cannot be
-/// parsed/laid out (or while the engine is still scaffolding).
+/// Render a LaTeX math string to SVG. Returns [`MathError::Parse`] if the input
+/// cannot be parsed/laid out, or [`MathError::Empty`] for empty/whitespace input.
 ///
 /// The input is math-mode LaTeX *without* surrounding `$`/`\[` delimiters
 /// (e.g. `\frac{dT}{dP}` or `v_{\text{L}}`); Wikipedia's `\displaystyle …`
 /// prefix and bare delimiters are tolerated by the parser.
-pub fn render_latex(src: &str, opts: &MathOptions) -> Option<MathRender> {
+pub fn render_latex(src: &str, opts: &MathOptions) -> Result<MathRender, MathError> {
     render_latex_with_preamble(src, "", opts)
 }
 
@@ -84,20 +93,21 @@ pub fn render_latex(src: &str, opts: &MathOptions) -> Option<MathRender> {
 /// (separated by a space) and the combined string goes through the same
 /// definition-expansion + layout path as [`render_latex`].
 ///
-/// Returns `None` if the (combined) input cannot be parsed/laid out, or if `src`
-/// is empty. See [`render_latex`] for the input conventions.
+/// Returns [`MathError::Parse`] if the (combined) input cannot be parsed/laid
+/// out, or [`MathError::Empty`] if `src` is empty. See [`render_latex`] for the
+/// input conventions.
 pub fn render_latex_with_preamble(
     src: &str,
     preamble: &str,
     opts: &MathOptions,
-) -> Option<MathRender> {
+) -> Result<MathRender, MathError> {
     // Translate LaTeX-flavored macro definitions (in both preamble and source)
     // into the `\def` form pulldown-latex understands, then parse the in-scope
     // atoms, lay them out left-to-right into one Hbox (with math-italic variables,
     // upright `\text`, and the Appendix-G inter-atom spacing matrix), and emit a
-    // self-contained SVG. Returns None on parse failure / empty input.
+    // self-contained SVG.
     if src.trim().is_empty() {
-        return None;
+        return Err(MathError::Empty);
     }
     let combined = if preamble.is_empty() {
         macros::expand_definitions(src)
@@ -111,14 +121,36 @@ pub fn render_latex_with_preamble(
     // colors + hex resolved by our table; unknown colors fall back to the default
     // text color) so an unrecognized color name can't fail the whole parse.
     let combined = color::normalize_color_args(&combined, opts.color);
-    let (root, face) = box_layout::layout(&combined, opts, arraystretch.unwrap_or(1.0))?;
+    let Some((root, face)) = box_layout::layout(&combined, opts, arraystretch.unwrap_or(1.0)) else {
+        // Layout returned nothing — surface the parser's own error message when
+        // it was a syntax error, else a generic "nothing to lay out".
+        let msg = match box_layout::parse::parse_error(&combined) {
+            Err(e) => e,
+            Ok(()) => "math produced no layout".to_string(),
+        };
+        return Err(MathError::Parse(msg));
+    };
     let (svg, width_px, height_px, baseline_px) = svg::emit(&root, &face, opts);
-    Some(MathRender {
+    Ok(MathRender {
         svg,
         width_px,
         height_px,
         baseline_px,
     })
+}
+
+/// Parse-only syntax check for math source: `Ok(())` means well-formed,
+/// `Err(MathError)` carries the problem. Empty/whitespace input is
+/// [`MathError::Empty`]; a parser failure is [`MathError::Parse`]. Mirrors the
+/// macro-expansion + parse front of [`render_latex_with_preamble`] without the
+/// box-layout / SVG back end.
+pub fn check_latex(src: &str) -> Result<(), MathError> {
+    if src.trim().is_empty() {
+        return Err(MathError::Empty);
+    }
+    let combined = macros::expand_definitions(src);
+    let (combined, _arraystretch) = macros::extract_arraystretch(&combined);
+    box_layout::parse::parse_error(&combined).map_err(MathError::Parse)
 }
 
 #[cfg(test)]
@@ -166,9 +198,24 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_is_none() {
-        assert!(render_latex("", &MathOptions::default()).is_none());
-        assert!(render_latex("   ", &MathOptions::default()).is_none());
+    fn empty_input_is_empty_error() {
+        assert!(matches!(
+            render_latex("", &MathOptions::default()),
+            Err(MathError::Empty)
+        ));
+        assert!(matches!(
+            render_latex("   ", &MathOptions::default()),
+            Err(MathError::Empty)
+        ));
+    }
+
+    #[test]
+    fn broken_input_is_parse_error() {
+        let err = render_latex(r"\frac{", &MathOptions::default());
+        assert!(
+            matches!(err, Err(MathError::Parse(ref m)) if !m.is_empty()),
+            "expected a non-empty Parse error, got {err:?}"
+        );
     }
 
     #[test]
@@ -282,7 +329,7 @@ mod tests {
     #[test]
     fn newcommand_no_args_renders() {
         let out = render_latex(r"\newcommand{\R}{\mathbb{R}}\R", &MathOptions::default());
-        assert!(out.is_some(), "expanded \\newcommand should render Some");
+        assert!(out.is_ok(), "expanded \\newcommand should render Ok");
     }
 
     /// `\newcommand{\v}[1]{\vec{#1}}\v{x}` renders, and matches the equivalent
@@ -305,15 +352,15 @@ mod tests {
     #[test]
     fn renew_and_provide_render() {
         let opts = MathOptions::default();
-        assert!(render_latex(r"\renewcommand{\R}{\mathbb{R}}\R", &opts).is_some());
-        assert!(render_latex(r"\providecommand{\R}{\mathbb{R}}\R", &opts).is_some());
+        assert!(render_latex(r"\renewcommand{\R}{\mathbb{R}}\R", &opts).is_ok());
+        assert!(render_latex(r"\providecommand{\R}{\mathbb{R}}\R", &opts).is_ok());
     }
 
     /// `\DeclareMathOperator{\lcm}{lcm}\lcm(a,b)` renders via `\operatorname`.
     #[test]
     fn declare_math_operator_renders() {
         let out = render_latex(r"\DeclareMathOperator{\lcm}{lcm}\lcm(a,b)", &MathOptions::default());
-        assert!(out.is_some(), "\\DeclareMathOperator should render Some");
+        assert!(out.is_ok(), "\\DeclareMathOperator should render Ok");
     }
 
     /// A reusable preamble of definitions is applied to the source.
@@ -321,7 +368,7 @@ mod tests {
     fn preamble_macros_apply() {
         let opts = MathOptions::default();
         let out = render_latex_with_preamble(r"\R^n", r"\newcommand{\R}{\mathbb{R}}", &opts);
-        assert!(out.is_some(), "preamble macro should render Some");
+        assert!(out.is_ok(), "preamble macro should render Ok");
     }
 
     /// A `\newcommand` with an optional-argument default is skipped gracefully
@@ -485,7 +532,7 @@ mod tests {
             ("xrightarrow", r"A \xrightarrow{f} B", &inline),
             ("xarrow-both", r"\xrightarrow[g]{f}", &inline),
         ] {
-            if let Some(out) = render_latex(src, opts) {
+            if let Ok(out) = render_latex(src, opts) {
                 let path = format!(
                     "{}/../target/math-{name}.svg",
                     env!("CARGO_MANIFEST_DIR")
@@ -513,7 +560,7 @@ mod tests {
             ),
             ("math-accent-slant", r"\hat{f} + \vec{A}", &inline),
         ] {
-            if let Some(out) = render_latex(src, opts) {
+            if let Ok(out) = render_latex(src, opts) {
                 let path = format!("/home/bobby/projects/html-widget/target/{name}.svg");
                 let _ = std::fs::write(&path, &out.svg);
                 eprintln!("[math] wrote {path} ({} bytes)", out.svg.len());
@@ -521,7 +568,7 @@ mod tests {
         }
 
         // A `\newcommand`-defined macro, rendered through the normal path.
-        if let Some(out) = render_latex(
+        if let Ok(out) = render_latex(
             r"\newcommand{\v}[1]{\vec{#1}}\v{F} = m\v{a}",
             &inline,
         ) {

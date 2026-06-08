@@ -14,6 +14,9 @@ ttf-parser = "0.25"
 # Pure-Rust LaTeX math engine — renders `$…$` spans in labels to embedded SVG
 # (mermaid uses KaTeX/JS for this; we do it in-process, no JS).
 hiker-math = { path = "../math" }
+# Shared render→SVG / syntax-check trait across the diagram engines; this crate
+# implements it for mermaid via the `Mermaid` marker type.
+hiker-diagram = { path = "../diagram" }
 
 [dev-dependencies]
 # Eyeball-only: rasterize the SVG output to PNG in the example/tests, and the

@@ -5,3 +5,8 @@ edition = "2024"
 description = "Reusable, egui-agnostic graph layout — tree/radial + ForceAtlas2, and a from-scratch dagre (Sugiyama) port. std-only, no graphics deps."
 
 [dependencies]
+
+[dev-dependencies]
+# Pixel-buffer rasterization for the `anchor_stability` headless example
+# (mirrors tools/graph-snapshot). Dev-only — the library stays graphics-free.
+image = { version = "0.25", default-features = false, features = ["png"] }

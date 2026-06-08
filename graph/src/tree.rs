@@ -19,6 +19,10 @@ pub enum LayoutKind {
     Radial,
     VerticalTree,
     HorizontalTree,
+    /// Dagre / Sugiyama layered layout (see [`crate::LayeredEngine`]). Unlike
+    /// the tree kinds it places nodes in directed ranks and produces poly-line
+    /// edge routes rather than a single tree placement.
+    Layered,
 }
 
 impl LayoutKind {
@@ -28,15 +32,17 @@ impl LayoutKind {
             LayoutKind::Radial => "Radial",
             LayoutKind::VerticalTree => "Vertical tree",
             LayoutKind::HorizontalTree => "Horizontal tree",
+            LayoutKind::Layered => "Layered",
         }
     }
 
-    pub const fn all() -> [LayoutKind; 4] {
+    pub const fn all() -> [LayoutKind; 5] {
         [
             LayoutKind::ForceDirected,
             LayoutKind::Radial,
             LayoutKind::VerticalTree,
             LayoutKind::HorizontalTree,
+            LayoutKind::Layered,
         ]
     }
 }
@@ -419,7 +425,7 @@ mod tests {
 
     #[test]
     fn layout_kind_metadata() {
-        assert_eq!(LayoutKind::all().len(), 4);
+        assert_eq!(LayoutKind::all().len(), 5);
         assert_eq!(LayoutKind::Radial.label(), "Radial");
     }
 }

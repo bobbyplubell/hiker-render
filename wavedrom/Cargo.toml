@@ -12,6 +12,9 @@ serde_json = "1"
 # Real text measurement: glyph advances from the bundled Liberation Sans (SIL
 # OFL — see fonts/LICENSE), so measured widths match what the SVG `<text>` draws.
 ttf-parser = "0.25"
+# Shared render→SVG / syntax-check trait across the diagram engines; this crate
+# implements it for WaveDrom via the `WaveDrom` marker type.
+hiker-diagram = { path = "../diagram" }
 
 [dev-dependencies]
 # Eyeball-only: rasterize the SVG output to PNG in the example via resvg.
